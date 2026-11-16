@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+*.sqlite*
+
+# Local tooling state and host projections used only in this workspace.
+.baron/
+.codex/
+.agents/
+.superpowers/
+/docs/baron/
+/AGENTS.md
