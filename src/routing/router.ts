@@ -100,6 +100,10 @@ export function routeTask(task: string, options: {
     /\b(bug|issue|error|crash|fail|failure|broken|regression|diagnos\w*|debug\w*|unexpected behavior|loi|su co|chan doan|hong)\b/,
   );
   const codeReviewRequested = /\b(code review|review (?:my |this |the )?(?:code|patch|change|implementation|pr|pull request)|(?:pr|pull request) review|xem lai (?:doan |phan |file )?(?:code|pr|pull request))\b/.test(intent);
+  const manualMattRequested = /\b(?:use|invoke|load|call|consult|run|ask|dung|goi|mo)\s+(?:the\s+)?(?:native\s+)?ask[- ]?matt\b/.test(intent)
+    || /\b(?:which|what)\s+(?:matt(?: pocock)?|ask[- ]?matt)(?:'s)?\s+(?:skill|flow|workflow)\b/.test(intent)
+    || /\b(?:skill|flow|workflow)\s+(?:cua\s+)?matt\b/.test(intent)
+    || /\b(?:hoi|hỏi)\s+matt\b/.test(intent);
   const nonCodeArtifact = /\b(readme|documentation|docs?|specification|spec|plan|roadmap|report|memo|email|presentation|slides|spreadsheet|adr|changelog)\b/.test(intent);
   const codeTarget = /\b(code|function|class|component|frontend|backend|api|endpoint|database|schema|route|server|mcp|provider|tool|feature|bug|module|package|tests?|config|integration|application|app|source|repository|project)\b/.test(intent);
   const codeChange = hasPattern(
@@ -189,6 +193,7 @@ export function routeTask(task: string, options: {
       0,
       "before_implementation",
       "The task asks to change code; define the expected behavior in a failing test before implementing it.",
+      { required: true },
     ));
   }
   if (frontend) {
@@ -223,6 +228,15 @@ export function routeTask(task: string, options: {
         : "The task explicitly requests a code review; inspect the requested code without adding an implementation route.",
     ));
   }
+  if (manualMattRequested) {
+    specialists.push(selection(
+      "matt-ask-matt",
+      0,
+      "explicit_manual_request",
+      "The user explicitly asked to consult native ask-matt for skill or workflow selection.",
+      { required: true },
+    ));
+  }
 
   const orderedSpecialists = specialists.map((item, index) => ({ ...item, order: index + 3 }));
   const contextSteps = requiredContext.map((provider) => ({
@@ -242,7 +256,7 @@ export function routeTask(task: string, options: {
     status: blockers.length > 0 ? "blocked" as const : providerGaps.length > 0 || fullAudit ? "ready_with_gaps" as const : "ready" as const,
     core_workflow: {
       workflow_id: "matt-pocock-main-flow",
-      source_skill_id: "ask-matt",
+      source_skill_id: "tyrant-matt-orchestrator",
       source_repo: "https://github.com/mattpocock/skills",
       required: true,
       order: 0,
@@ -256,7 +270,7 @@ export function routeTask(task: string, options: {
         host_availability: "unknown" as const,
         status: "not_invoked" as const,
       },
-      host_action_required: "The Tyrant-owned policy ran locally. The native ask-matt skill is manual-only; load eligible native workflow skills through the host adapter and do not report them loaded until the host provides evidence.",
+      host_action_required: "The Tyrant-owned Matt Pocock-inspired policy ran automatically. Do not ask the user to approve skill selection; load the smallest applicable native specialist skills through the host adapter. Only use native ask-matt when the user explicitly requests it, and never report an implicit native ask-matt invocation.",
     },
     required_context: requiredContext,
     ...(securityAudit ? { security_audit: securityAudit } : {}),

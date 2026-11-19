@@ -1,6 +1,6 @@
 # SPEC-02 — Skill Catalog and Routing Policy
 
-Status: Implemented for catalog, deterministic routing, and skill lifecycle event validation. Native host skill loading remains an explicit integration boundary; ai-memory is integrated in SPEC-03 and Graphify in SPEC-04.
+Status: Catalog, deterministic routing, pinned project skill installation/integrity checks, lifecycle event validation, and automatic host-adapter loading are fixture-tested. Live-host acceptance remains pending; ai-memory is integrated in SPEC-03 and Graphify in SPEC-04.
 Depends on: SPEC-00, SPEC-01
 
 ## 1. Purpose
@@ -11,19 +11,19 @@ Choose the smallest useful skill set for each task and resolve overlaps without 
 
 Each catalog entry records a stable Tyrant ID, name, upstream repository, pinned version and commit, license, description, triggers, runtime/tool requirements, host-loading method, invocation policy, conflicts, fallbacks, and host availability. See [the implemented skill catalog](../docs/SKILL-CATALOG.md).
 
-The catalog describes and routes skills. It does not silently rewrite upstream instructions, install upstream bundles, fetch metadata at runtime, or claim ownership of upstream code. Native skill installation state is unknown unless a host adapter verifies it.
+The catalog describes and routes skills. Tyrant vendors an allowlisted, pinned subset/full skill tree and copies those files into the project-owned `.tyrant/skills/` directory during explicit setup. Runtime setup does not fetch upstream code or execute package scripts. Adapters verify the copied body hash before loading it. This does not mean a host's native Skill tool ran.
 
 ## 3. Core workflow and specialist routes
 
 Matt Pocock's engineering workflow is Tyrant's core orchestration policy, analogous to Superpowers in Baron. It runs internally for each repository task and establishes task shape, order, and applicable specialist routes. It is not an optional route that must be separately requested.
 
-The native upstream `ask-matt` skill is manual-only. Tyrant does not claim to invoke it automatically. The MCP server returns the route and asks the host to load eligible native skills; it cannot itself force Codex, DeepSeek Harness, Claude, or another host to load one.
+Tyrant's own Matt Pocock-inspired orchestration policy runs automatically before every repository task and selects the relevant specialist skills without asking the user to choose or approve the route. The upstream `ask-matt` remains manual-only and is loaded only when the user explicitly asks to consult it; automatic policy injection is not a claim that native ask-matt ran. SPEC-08 defines this behavior and the full AI-Memory tool surface.
 
 | Task intent or phase | Route after/beside the core policy |
 | --- | --- |
 | Start or resume repository work | Required ai-memory history and handoff, then current task checkpoint |
 | Prepare to work in a repository | Required current Graphify map and scoped query |
-| Implement code | Recommend Matt TDD before implementation and Matt code review after implementation |
+| Implement code | Require Matt TDD before implementation and route Matt code review after implementation |
 | Diagnose a bug or unexpected failure | Select Matt diagnosing-bugs before changing code |
 | Request a code or PR review | Select Matt code-review without adding TDD unless implementation work is also requested |
 | Implement or redesign frontend | Require Taste |
@@ -49,7 +49,7 @@ Preserve the required provider preflight if a specialist route changes. Site Clo
 
 ## 6. Verification and integration boundary
 
-Tests cover the pinned catalog, bilingual deterministic routes, provider distinction and blockers, security gating, lifecycle evidence validation, and persistence. Host app/CLI loading is not verified here. SPEC-03 implements ai-memory execution and SPEC-04 implements Graphify preflight; host-specific native skill loading remains a separate integration task.
+Tests cover the pinned catalog, bilingual deterministic routes, provider distinction and blockers, security gating, lifecycle evidence validation, persistence, pinned package integrity, and SPEC-06 host-adapter injection. They do not verify that an installed host has trusted or loaded the adapter or that a host-native Skill tool ran. SPEC-03 implements ai-memory execution, SPEC-04 implements Graphify preflight, and SPEC-06 installs pinned skill bodies into the project for adapter-based loading.
 
 ## 7. Updates
 

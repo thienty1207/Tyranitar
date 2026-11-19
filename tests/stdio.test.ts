@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { AI_MEMORY_UPSTREAM_TOOLS } from "../src/providers/ai-memory-tool-contract";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const stateDirectory = await mkdtemp(join(tmpdir(), "tyrant-mcp-state-"));
@@ -99,7 +100,10 @@ test("stdio tool discovery, calls, stdout purity, and checkpoint recovery surviv
     expect(initialized).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: "tyrant" } } });
 
     const tools = await first.request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-    expect(tools?.result?.tools?.map((tool: { name: string }) => tool.name).sort()).toEqual([
+    const toolNames = tools?.result?.tools?.map((tool: { name: string }) => tool.name).sort() ?? [];
+    expect(toolNames).toHaveLength(36);
+    expect(toolNames).toEqual(expect.arrayContaining(AI_MEMORY_UPSTREAM_TOOLS.map((tool) => `tyrant_${tool.name}`)));
+    expect(toolNames).toEqual(expect.arrayContaining([
       "tyrant_checkpoint",
       "tyrant_finish_task",
       "tyrant_get_task",
@@ -109,7 +113,7 @@ test("stdio tool discovery, calls, stdout purity, and checkpoint recovery surviv
       "tyrant_record_evidence",
       "tyrant_sync_memory",
       "tyrant_transition_task",
-    ]);
+    ]));
 
     const prepared = await first.request({
       jsonrpc: "2.0",

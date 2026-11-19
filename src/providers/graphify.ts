@@ -168,13 +168,13 @@ export class GraphifyProvider {
     this.runner = options.runner ?? spawnGraphify;
   }
 
-  async loadContext(input: { summary: string }): Promise<GraphifyContextResult> {
+  async loadContext(input: { summary: string; timeoutMs?: number }): Promise<GraphifyContextResult> {
     const operation = this.operationQueue.then(() => this.loadContextNow(input));
     this.operationQueue = operation.then(() => undefined, () => undefined);
     return operation;
   }
 
-  private async loadContextNow(input: { summary: string }): Promise<GraphifyContextResult> {
+  private async loadContextNow(input: { summary: string; timeoutMs?: number }): Promise<GraphifyContextResult> {
     const graphPath = resolve(this.projectRoot, "graphify-out", "graph.json");
     const outputRoot = resolve(this.projectRoot, "graphify-out");
     if (!this.executable) return result("unavailable", await pathExists(graphPath) ? "stale" : "missing", "command_missing");
@@ -190,8 +190,11 @@ export class GraphifyProvider {
     }
 
     const env = childEnvironment(projectRoot);
+    const operationTimeoutMs = Number.isFinite(input.timeoutMs) && input.timeoutMs! >= 1_000
+      ? Math.min(this.timeoutMs, Math.floor(input.timeoutMs!))
+      : this.timeoutMs;
     const invoke = (args: string[]) => this.runner({
-      executable: this.executable!, args, cwd: projectRoot, env, timeoutMs: this.timeoutMs,
+      executable: this.executable!, args, cwd: projectRoot, env, timeoutMs: operationTimeoutMs,
     });
 
     let refresh: GraphifyRunResult;

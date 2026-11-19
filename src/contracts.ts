@@ -23,13 +23,27 @@ export const prepareTaskInput = z.object({
   task: shortText(8_000).describe("A bounded task summary. Never include passwords, API keys, tokens, or other secrets; summaries are persisted locally in plaintext."),
   request_id: requestId,
   task_id: taskId.optional().describe("Existing task to resume; omit to create a task."),
+  resume_session: z.boolean().default(false).describe("For host automation only: reuse an active task matching host_id and session_id when task_id is omitted."),
   host_id: optionalText(128),
   session_id: optionalText(256),
+}).superRefine((input, context) => {
+  if (input.resume_session && !input.task_id && (!input.host_id || !input.session_id)) {
+    context.addIssue({ code: "custom", path: ["session_id"], message: "Automatic session reuse requires host_id and session_id." });
+  }
 });
 
 export const getTaskInput = z.object({
   schema_version: schemaVersion,
   task_id: taskId.optional().describe("Task to read; omit to read the latest task for this project."),
+  host_id: optionalText(128),
+  session_id: optionalText(256),
+}).superRefine((input, context) => {
+  if (Boolean(input.host_id) !== Boolean(input.session_id)) {
+    context.addIssue({ code: "custom", path: ["session_id"], message: "Session lookup requires both host_id and session_id." });
+  }
+  if (input.task_id && (input.host_id || input.session_id)) {
+    context.addIssue({ code: "custom", path: ["task_id"], message: "Use either task_id or a host/session pair, not both." });
+  }
 });
 
 export const transitionTaskInput = z.object({
@@ -81,6 +95,8 @@ export const recordEventToolInput = z.object({
     "graphify_context_loaded",
     "memory_sync_succeeded",
     "memory_sync_failed",
+    "memory_handoff_claimed",
+    "ai_memory_tool_called",
     "skill_loaded",
     "skill_used",
     "skill_completed",

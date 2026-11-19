@@ -21,6 +21,8 @@ Every repository task must confirm that a Graphify map exists and is current so 
 - Keep graph outputs and logs scoped to the selected repo.
 - If Graphify is unavailable or stale, report the required preflight failure and do not claim a graph query ran. Code-level work remains blocked until Graphify is available and current; safe read-only diagnosis and setup may continue.
 
+Tyrant setup installs or validates the exact Graphify CLI source/version pinned by this spec and manages any required Python runtime in an isolated user-level environment. Users must not have to install `uv` manually; Tyrant may bootstrap it privately or use another supported Python package manager. Verify the installed version and the required CLI commands before marking Graphify ready. Do not run Graphify's host installer by default when Tyrant already owns preflight and context injection; that installer may add another native skill, instruction file, or hook. Graphify remains a project-local provider, and its outputs stay under that repository's `graphify-out` directory, separate from AI-Memory data.
+
 Tyrant uses the pinned Graphify CLI. Each prepare runs its incremental `extract` in code-only mode under `<project>/graphify-out`, then issues a task-scoped query at depth 2 with a 500-token budget. Tyrant returns at most 3,000 characters and stores the graph/query hashes and provider state, not a duplicate graph or an unbounded transcript. The child process disables Graphify's optional home-directory query log. `TYRANT_GRAPHIFY_BIN` and `TYRANT_GRAPHIFY_TIMEOUT_MS` configure the CLI path and timeout.
 
 ## 4. Acceptance criteria

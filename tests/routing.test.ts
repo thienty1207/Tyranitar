@@ -100,6 +100,7 @@ test("prepare applies the internal Matt policy and orders required project conte
 
   expect(route.core_workflow).toMatchObject({
     workflow_id: "matt-pocock-main-flow",
+    source_skill_id: "tyrant-matt-orchestrator",
     policy_applied: true,
     status: "used",
     execution_method: "tyrant_internal_policy",
@@ -131,6 +132,22 @@ test("prepare applies the internal Matt policy and orders required project conte
   ]);
   expect(route.blockers.map((blocker: any) => blocker.provider)).toEqual(["ai-memory", "graphify"]);
   expect(prepared.task.status).toBe("blocked");
+});
+
+test("Matt policy auto-routes routine work and selects native ask-matt only on explicit request", () => {
+  const normal = routeTask("Implement a backend endpoint", { aiMemoryReady: true, graphifyReady: true, graphifyMapStatus: "current" });
+  expect(normal.core_workflow).toMatchObject({ source_skill_id: "tyrant-matt-orchestrator", policy_applied: true });
+  expect(normal.specialists.map((skill) => skill.skill_id)).toContain("matt-tdd");
+  expect(normal.specialists.find((skill) => skill.skill_id === "matt-tdd")).toMatchObject({ required: true, phase: "before_implementation" });
+  expect(normal.specialists.map((skill) => skill.skill_id)).not.toContain("matt-ask-matt");
+
+  const genericChoice = routeTask("Which skill should I use?", { aiMemoryReady: true, graphifyReady: true, graphifyMapStatus: "current" });
+  expect(genericChoice.specialists.map((skill) => skill.skill_id)).not.toContain("matt-ask-matt");
+
+  const explicit = routeTask("Use ask-matt to choose a Matt Pocock workflow", { aiMemoryReady: true, graphifyReady: true, graphifyMapStatus: "current" });
+  expect(explicit.specialists).toContainEqual(expect.objectContaining({
+    skill_id: "matt-ask-matt", required: true, phase: "explicit_manual_request",
+  }));
 });
 
 test("route requires Taste for Vietnamese frontend tasks and keeps security questions in guidance mode", async () => {

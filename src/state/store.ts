@@ -37,6 +37,7 @@ type StoredTask = {
   memory_page_ref: string | null;
   memory_handoff_id: string | null;
   memory_error_code: string | null;
+  memory_error_step: string | null;
   finish_summary: string | null;
   next_action: string | null;
   finished_at: string | null;
@@ -46,7 +47,8 @@ type StoredTask = {
   updated_at: string;
 };
 
-function stateDirectory(): string {
+function stateDirectory(override?: string): string {
+  if (override?.trim()) return resolve(override);
   if (process.env.TYRANT_STATE_DIR?.trim()) return resolve(process.env.TYRANT_STATE_DIR);
   if (process.platform === "win32") {
     return join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "Tyrant");
@@ -54,8 +56,8 @@ function stateDirectory(): string {
   return join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "tyrant");
 }
 
-function canonicalProjectRoot(): string {
-  const candidate = resolve(process.env.TYRANT_PROJECT_ROOT?.trim() || process.cwd());
+function canonicalProjectRoot(projectRoot?: string): string {
+  const candidate = resolve(projectRoot?.trim() || process.env.TYRANT_PROJECT_ROOT?.trim() || process.cwd());
   try {
     return realpathSync(candidate);
   } catch {
@@ -86,10 +88,10 @@ export class TyrantStore {
   readonly projectRoot: string;
   private readonly db: Database;
 
-  constructor() {
-    this.projectRoot = canonicalProjectRoot();
+  constructor(options: { projectRoot?: string; stateDirectory?: string } = {}) {
+    this.projectRoot = canonicalProjectRoot(options.projectRoot);
     this.projectId = projectId(this.projectRoot);
-    const directory = stateDirectory();
+    const directory = stateDirectory(options.stateDirectory);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const dbPath = join(directory, "tyrant.sqlite3");
     this.db = new Database(dbPath, { create: true, strict: true });
@@ -114,6 +116,7 @@ export class TyrantStore {
         memory_page_ref TEXT,
         memory_handoff_id TEXT,
         memory_error_code TEXT,
+        memory_error_step TEXT,
         finish_summary TEXT,
         next_action TEXT,
         finished_at TEXT,
@@ -198,6 +201,7 @@ export class TyrantStore {
     addTaskColumn("memory_page_ref", "TEXT");
     addTaskColumn("memory_handoff_id", "TEXT");
     addTaskColumn("memory_error_code", "TEXT");
+    addTaskColumn("memory_error_step", "TEXT");
     if (!taskColumns.some((column) => column.name === "finish_summary")) this.db.exec("ALTER TABLE tasks ADD COLUMN finish_summary TEXT;");
     if (!taskColumns.some((column) => column.name === "next_action")) this.db.exec("ALTER TABLE tasks ADD COLUMN next_action TEXT;");
     if (!taskColumns.some((column) => column.name === "finished_at")) this.db.exec("ALTER TABLE tasks ADD COLUMN finished_at TEXT;");
@@ -218,6 +222,7 @@ export class TyrantStore {
     if (!eventColumns.some((column) => column.name === "next_action")) {
       this.db.exec("ALTER TABLE events ADD COLUMN next_action TEXT;");
     }
+    this.db.exec("CREATE INDEX IF NOT EXISTS events_host_session ON events(host_id, session_id, created_at DESC);");
     if (process.platform !== "win32") {
       try {
         chmodSync(directory, 0o700);
@@ -238,6 +243,56 @@ export class TyrantStore {
     ).get(taskId, this.projectId);
     if (!task) throw new TyrantError("NOT_FOUND", "Task was not found in this project.");
     return task;
+  }
+
+  findTaskForSession(hostId?: string, sessionId?: string, activeOnly = false): string | undefined {
+    if (!hostId || !sessionId) return undefined;
+    const lifecycleFilter = activeOnly ? "AND t.lifecycle_state NOT IN ('completed', 'handoff')" : "";
+    const row = this.db.query<{ id: string }, [string, string, string]>(
+      `SELECT t.id FROM tasks t
+       WHERE t.project_id = ? ${lifecycleFilter}
+         AND EXISTS (
+           SELECT 1 FROM events e
+           WHERE e.task_id = t.id AND e.host_id = ? AND e.session_id = ?
+         )
+       ORDER BY t.updated_at DESC LIMIT 1`,
+    ).get(this.projectId, hostId, sessionId);
+    return row?.id;
+  }
+
+  findPendingMemoryHandoffs(limit = 2): Array<Record<string, any>> {
+    const boundedLimit = Math.max(1, Math.min(2, Math.floor(limit)));
+    const rows = this.db.query<{ id: string }, [string, number]>(
+      "SELECT t.id FROM tasks t WHERE t.project_id = ? AND t.lifecycle_state = 'handoff' AND (t.memory_sync_status != 'synced' OR (t.memory_handoff_status IN ('created', 'existing') AND t.memory_handoff_id IS NOT NULL)) AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND e.event_type = 'memory_handoff_claimed') ORDER BY t.updated_at DESC LIMIT ?",
+    ).all(this.projectId, boundedLimit);
+    return rows.map(({ id }) => this.getTask(id));
+  }
+
+  recordMemoryHandoffClaim(input: { source_task_id: string; receiver_task_id: string; handoff_id?: string; host_id?: string; session_id?: string }) {
+    const transaction = this.db.transaction(() => {
+      this.ensureTask(input.source_task_id);
+      this.ensureTask(input.receiver_task_id);
+      const alreadyClaimed = this.db.query<{ count: number }, [string]>(
+        "SELECT COUNT(*) AS count FROM events WHERE task_id = ? AND event_type = 'memory_handoff_claimed'",
+      ).get(input.source_task_id)?.count ?? 0;
+      if (alreadyClaimed > 0) return false;
+      this.insertEvent({
+        task_id: input.source_task_id, event_type: "memory_handoff_claimed",
+        summary: "Claimed the prior ai-memory handoff for a new host task.", outcome: "success",
+        evidence_refs: [
+          ...(input.handoff_id ? [`ai-memory:handoff:${input.handoff_id}`] : []),
+          `tyrant-task:${input.receiver_task_id}`,
+        ], actor: "tyrant", host_id: input.host_id, session_id: input.session_id,
+      });
+      return true;
+    });
+    return transaction();
+  }
+
+  getTaskForSession(hostId: string, sessionId: string) {
+    const taskId = this.findTaskForSession(hostId, sessionId);
+    if (!taskId) throw new TyrantError("NOT_FOUND", "No task was found for this host session in this project.");
+    return this.getTask(taskId);
   }
 
   private replay<T>(scope: string, requestId: string, payload: unknown): T | undefined {
@@ -324,6 +379,9 @@ export class TyrantStore {
     const events = this.db.query<Record<string, unknown>, [string]>(
       "SELECT id, task_id, event_type, summary, skill_id, outcome, next_action, evidence_refs_json, artifact_refs_json, actor, host_id, session_id, previous_state, new_state, metadata_json, created_at FROM events WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 20",
     ).all(row.id);
+    const latestBlockEvent = this.db.query<Record<string, unknown>, [string]>(
+      "SELECT id, event_type, summary, new_state, actor, host_id, session_id, created_at FROM events WHERE task_id = ? AND (event_type = 'task_blocked' OR (event_type = 'task_state_changed' AND new_state = 'blocked')) ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    ).get(row.id);
     const evidence = this.db.query<Record<string, unknown>, [string]>(
       "SELECT id, check_id, status, summary, evidence_ref, created_at FROM evidence WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 20",
     ).all(row.id);
@@ -335,10 +393,11 @@ export class TyrantStore {
         id: row.id, summary: row.task, status: row.status, lifecycle_state: row.lifecycle_state,
         finish_summary: row.finish_summary, next_action: row.next_action, finished_at: row.finished_at,
         project_id: row.project_id, created_at: row.created_at, updated_at: row.updated_at,
-        ai_memory: { context_status: row.ai_memory_status, sync_status: row.memory_sync_status, handoff_status: row.memory_handoff_status, page_ref: row.memory_page_ref, handoff_id: row.memory_handoff_id, error_code: row.memory_error_code },
+        ai_memory: { context_status: row.ai_memory_status, sync_status: row.memory_sync_status, handoff_status: row.memory_handoff_status, page_ref: row.memory_page_ref, handoff_id: row.memory_handoff_id, error_code: row.memory_error_code, error_step: row.memory_error_step },
         graphify: { context_status: row.graphify_status, map_status: row.graphify_map_status, references: jsonArray(row.graphify_refs_json), error_code: row.graphify_error_code },
       },
       route: JSON.parse(row.route_json), blockers: JSON.parse(row.blockers_json),
+      latest_block_event: latestBlockEvent ?? null,
       checkpoint: checkpoint ? {
         id: checkpoint.id, phase: checkpoint.phase, last_reliable_step: checkpoint.last_reliable_step,
         next_action: checkpoint.next_action, blocker: checkpoint.blocker,
@@ -355,18 +414,31 @@ export class TyrantStore {
       })), evidence,
     };
   }
+
+  getSoleActiveTask() {
+    const active = this.db.query<{ id: string }, [string]>(
+      "SELECT id FROM tasks WHERE project_id = ? AND lifecycle_state NOT IN ('completed', 'handoff') ORDER BY updated_at DESC LIMIT 2",
+    ).all(this.projectId);
+    if (active.length !== 1) return undefined;
+    return this.getTask(active[0].id);
+  }
   prepare(input: {
-    task: string; request_id: string; task_id?: string; route: unknown; blockers: unknown[]; host_id?: string; session_id?: string;
+    task: string; request_id: string; task_id?: string; resume_session?: boolean; route: unknown; blockers: unknown[]; host_id?: string; session_id?: string;
+    idempotency_input?: unknown;
     ai_memory_status?: "ready" | "incomplete" | "unavailable"; ai_memory_refs?: string[]; ai_memory_error_code?: string;
     graphify_status?: "ready" | "incomplete" | "unavailable"; graphify_map_status?: "current" | "stale" | "missing" | "unsafe";
     graphify_refs?: string[]; graphify_error_code?: string;
   }) {
     const safeTask = redactSensitiveText(input.task);
+    const replayInput = input.idempotency_input ?? input;
     const transaction = this.db.transaction(() => {
-      const existingReplay = this.replay<Record<string, unknown>>(this.projectId, input.request_id, input);
+      const existingReplay = this.replay<Record<string, unknown>>(this.projectId, input.request_id, replayInput);
       if (existingReplay) return existingReplay;
-      if (input.task_id) {
-        const existing = this.ensureTask(input.task_id);
+      const selectedTaskId = input.task_id ?? (input.resume_session
+        ? this.findTaskForSession(input.host_id, input.session_id, true)
+        : undefined);
+      if (selectedTaskId) {
+        const existing = this.ensureTask(selectedTaskId);
         const memoryStatus = input.ai_memory_status ?? "unavailable";
         const graphifyStatus = input.graphify_status ?? "unavailable";
         const graphifyMapStatus = input.graphify_map_status ?? "missing";
@@ -381,7 +453,7 @@ export class TyrantStore {
         });
         this.insertGraphifyContextEvent(existing.id, graphifyStatus, graphifyMapStatus, graphifyRefs, input.graphify_error_code, input.host_id, input.session_id);
         const result = this.getTask(existing.id);
-        this.saveReplay(this.projectId, input.request_id, input, result);
+        this.saveReplay(this.projectId, input.request_id, replayInput, result);
         return result;
       }
 
@@ -435,7 +507,7 @@ export class TyrantStore {
       });
       this.insertGraphifyContextEvent(id, graphifyStatus, graphifyMapStatus, graphifyRefs, input.graphify_error_code, input.host_id, input.session_id);
       const result = this.getTask(id);
-      this.saveReplay(this.projectId, input.request_id, input, result);
+      this.saveReplay(this.projectId, input.request_id, replayInput, result);
       return result;
     });
     return transaction();
@@ -584,27 +656,29 @@ export class TyrantStore {
   recordMemorySync(input: {
     task_id: string; status: "synced" | "incomplete" | "unavailable" | "uncertain";
     handoff_status: "created" | "existing" | "uncertain" | "not_required"; page_ref?: string; handoff_id?: string;
-    error_code?: string; actor?: string; host_id?: string; session_id?: string;
+    error_code?: string; error_step?: string; actor?: string; host_id?: string; session_id?: string;
   }) {
     const transaction = this.db.transaction(() => {
       const current = this.ensureTask(input.task_id);
       const pageRef = input.page_ref ? redactSensitiveText(input.page_ref) : null;
       const handoffIdValue = input.handoff_id ? redactSensitiveText(input.handoff_id) : null;
       const errorCode = input.error_code ? (/^[a-z0-9_-]{1,80}$/i.test(input.error_code) ? input.error_code.toLowerCase() : "provider_error") : null;
+      const errorStep = input.error_step ? (/^[a-z][a-z0-9_]{0,63}$/i.test(input.error_step) ? input.error_step.toLowerCase() : null) : null;
       const changed = current.memory_sync_status !== input.status
         || current.memory_handoff_status !== input.handoff_status
         || current.memory_page_ref !== pageRef
         || current.memory_handoff_id !== handoffIdValue
-        || current.memory_error_code !== errorCode;
+        || current.memory_error_code !== errorCode
+        || current.memory_error_step !== errorStep;
       if (!changed) return this.getTask(input.task_id);
       const timestamp = now();
       this.db.query(
-        "UPDATE tasks SET memory_sync_status = ?, memory_handoff_status = ?, memory_page_ref = ?, memory_handoff_id = ?, memory_error_code = ?, updated_at = ? WHERE id = ? AND project_id = ?",
-      ).run(input.status, input.handoff_status, pageRef, handoffIdValue, errorCode, timestamp, input.task_id, this.projectId);
+        "UPDATE tasks SET memory_sync_status = ?, memory_handoff_status = ?, memory_page_ref = ?, memory_handoff_id = ?, memory_error_code = ?, memory_error_step = ?, updated_at = ? WHERE id = ? AND project_id = ?",
+      ).run(input.status, input.handoff_status, pageRef, handoffIdValue, errorCode, errorStep, timestamp, input.task_id, this.projectId);
       this.insertEvent({
         task_id: input.task_id,
         event_type: input.status === "synced" ? "memory_sync_succeeded" : "memory_sync_failed",
-        summary: input.status === "synced" ? "Synchronized the concise task outcome to ai-memory." : `ai-memory outcome sync is ${input.status}${errorCode ? ` (${errorCode})` : ""}.`,
+        summary: input.status === "synced" ? "Synchronized the concise task outcome to ai-memory." : "ai-memory outcome sync is " + input.status + (errorCode ? " (" + errorCode + ")" : "") + (errorStep ? " at " + errorStep : "") + ".",
         outcome: input.status === "synced" ? "success" : input.status === "uncertain" ? "uncertain" : "incomplete",
         evidence_refs: pageRef ? [pageRef] : [], artifact_refs: handoffIdValue ? [`ai-memory:handoff:${handoffIdValue}`] : [],
         actor: input.actor ?? "tyrant", host_id: input.host_id, session_id: input.session_id,
@@ -654,8 +728,11 @@ export class TyrantStore {
   }
 }
 
-export function withTyrantStore<T>(operation: (store: TyrantStore) => T): T {
-  const store = new TyrantStore();
+export function withTyrantStore<T>(
+  operation: (store: TyrantStore) => T,
+  options: { projectRoot?: string; stateDirectory?: string } = {},
+): T {
+  const store = new TyrantStore(options);
   try {
     return operation(store);
   } finally {

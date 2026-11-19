@@ -2,9 +2,9 @@
 
 Status: Draft for owner review. Documentation only; no product code or installation changes.
 
-## Count: 8 specifications
+## Count: 9 specifications
 
-There are **8 specs total: 1 master spec and 7 focused specs.**
+There are **9 specs total: 1 master spec and 8 focused specs.**
 
 | ID | File | Scope |
 | --- | --- | --- |
@@ -16,8 +16,9 @@ There are **8 specs total: 1 master spec and 7 focused specs.**
 | SPEC-05 | [Security and trust](SPEC-05-SECURITY-AND-TRUST.md) | Privacy, permissions, sandbox and audit routing |
 | SPEC-06 | [Distribution and setup](SPEC-06-DISTRIBUTION-AND-SETUP.md) | Install, update, rollback and uninstall |
 | SPEC-07 | [Acceptance and roadmap](SPEC-07-ACCEPTANCE-AND-ROADMAP.md) | User outcomes, evaluation and staged delivery |
+| SPEC-08 | [Full AI-Memory tools and Matt orchestration](SPEC-08-AI-MEMORY-ALL-TOOLS-AND-MATT-ORCHESTRATION.md) | Complete AI-Memory MCP surface, project-bound profiles and automatic orchestration |
 
-Read SPEC-00 first. SPEC-01 through SPEC-06 define product contracts. SPEC-07 brings them together into acceptance criteria.
+Read SPEC-00 first. SPEC-01 through SPEC-06 define product contracts. SPEC-07 brings them together into acceptance criteria. SPEC-08 extends the AI-Memory tool and orchestration contract.
 
 Tyrant is a new, independently installable MCP orchestrator inspired by useful Baron design ideas, not a Baron port. Matt Pocock’s engineering workflow is its core orchestration skill family. ai-memory and Graphify are required project-context providers; Taste is required for frontend work; Cloudflare security-audit is a specialist route. Codex Desktop/CLI and DeepSeek Harness Desktop/CLI are primary targets; OpenCode is supported; Claude Desktop/CLI receives compatibility smoke coverage.
 

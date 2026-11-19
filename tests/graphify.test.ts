@@ -66,6 +66,22 @@ test("refreshes a local code-only map, runs a bounded query, and returns stable 
   expect(invocations[0].cwd).toBe(projectRoot);
 });
 
+test("host-specific Graphify deadlines never exceed the configured provider timeout", async () => {
+  const projectRoot = await createProject("host-deadline");
+  const invocations: GraphifyInvocation[] = [];
+  const provider = new GraphifyProvider({
+    projectRoot, executable: "graphify-fixture", timeoutMs: 120_000,
+    runner: async (invocation) => {
+      invocations.push(invocation);
+      if (invocation.args[0] === "extract") await writeGraph(projectRoot);
+      return { exitCode: 0, stdout: invocation.args[0] === "query" ? "main.ts::entry" : "updated", stderr: "", timedOut: false };
+    },
+  });
+  const result = await provider.loadContext({ summary: "Inspect the service", timeoutMs: 18_000 });
+  expect(result.status).toBe("ready");
+  expect(invocations.map((invocation) => invocation.timeoutMs)).toEqual([18_000, 18_000]);
+});
+
 test("reports Graphify unavailable without invoking a shell or fabricating a graph result", async () => {
   const projectRoot = await createProject("missing-cli");
   let called = false;

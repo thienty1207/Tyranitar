@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as z from "zod/v4";
@@ -14,10 +14,12 @@ type Fixture = {
   pages: Map<string, { page_id: string; path: string; body: string }>;
   handoffs: Array<{ handoff_id: string; summary: string; next_steps: string[]; status: string; open_questions?: string[] }>;
   calls: Array<{ name: string; args: Record<string, unknown> }>;
+  failNextToolCall: (name: string, code: number | string, message: string) => void;
   setFailNextHandoff: () => void;
   replacePage: (key: string, body: string) => void;
   raceNextWrite: (key: string, body: string) => void;
   setQueryPayload: (payload: unknown) => void;
+  setProxyPayload: (payload: unknown) => void;
   consumeHandoffWithoutBody: () => void;
   failNextHandoffList: () => void;
   delayNextQuery: (milliseconds: number) => void;
@@ -28,6 +30,7 @@ async function createMemoryFixture(): Promise<Fixture> {
   const pages = new Map<string, { page_id: string; path: string; body: string }>();
   const handoffs: Fixture["handoffs"] = [];
   const calls: Fixture["calls"] = [];
+  let nextToolFailure: { name: string; code: number | string; message: string } | undefined;
   let failNextHandoff = false;
   let handoffListFailure = false;
   let consumeWithoutBody = false;
@@ -35,6 +38,7 @@ async function createMemoryFixture(): Promise<Fixture> {
   let queryPayload: unknown = {
     hits: [{ page_id: "historical-page-1", path: "decisions/auth.md", excerpt: "Earlier decision: keep provider state outside the agent transcript." }],
   };
+  let proxyPayload: unknown;
   let pendingRace: { key: string; body: string } | undefined;
   const keyFor = (args: Record<string, unknown>) => `${args.workspace}/${args.project}/${args.path ?? ""}`;
   const buildServer = () => {
@@ -43,6 +47,11 @@ async function createMemoryFixture(): Promise<Fixture> {
       server.registerTool(name, { inputSchema }, async (raw) => {
         const args = raw as Record<string, unknown>;
         calls.push({ name, args });
+        if (nextToolFailure?.name === name) {
+          const failure = nextToolFailure;
+          nextToolFailure = undefined;
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code: failure.code, message: failure.message } }) }] };
+        }
         const result = await run(args);
         const output = result as Record<string, unknown>;
         if (output.__toolError === true) return { isError: true, content: [{ type: "text", text: JSON.stringify(output.payload ?? output) }] };
@@ -72,6 +81,17 @@ async function createMemoryFixture(): Promise<Fixture> {
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       return queryPayload;
     });
+    addTool("memory_briefing", z.object({
+      workspace: z.string().optional(), project: z.string().optional(), settled_first: z.boolean().optional(),
+    }), (args) => proxyPayload ?? args);
+    addTool("memory_delete_page", z.object({
+      path: z.string(), workspace: z.string().optional(), project: z.string().optional(), scope: z.enum(["profile", "global"]).optional(),
+    }), (args) => args);
+    addTool("memory_message_send", z.object({
+      to_workspace: z.string(), to_project: z.string(), body: z.string(),
+      from_workspace: z.string().optional(), from_project: z.string().optional(),
+    }), (args) => args);
+    addTool("memory_install_self_routing", z.object({ compact: z.boolean().optional() }), (args) => args);
     addTool("memory_handoff_list", z.object({ workspace: z.string(), project: z.string() }), () => {
       if (handoffListFailure) { handoffListFailure = false; return { __toolError: true, payload: { error: "temporary list failure" } }; }
       return { handoffs: handoffs.filter((handoff) => handoff.status === "open") };
@@ -116,11 +136,13 @@ async function createMemoryFixture(): Promise<Fixture> {
     },
   });
   const fixture = {
+    failNextToolCall: (name: string, code: number | string, message: string) => { nextToolFailure = { name, code, message }; },
     url: `http://127.0.0.1:${http.port}/mcp`, pages, handoffs, calls,
     setFailNextHandoff: () => { failNextHandoff = true; },
     replacePage: (key: string, body: string) => pages.set(key, { page_id: "page-before", path: key.split("/").slice(2).join("/"), body }),
     raceNextWrite: (key: string, body: string) => { pendingRace = { key, body }; },
     setQueryPayload: (payload: unknown) => { queryPayload = payload; },
+    setProxyPayload: (payload: unknown) => { proxyPayload = payload; },
     consumeHandoffWithoutBody: () => { consumeWithoutBody = true; },
     failNextHandoffList: () => { handoffListFailure = true; },
     delayNextQuery: (milliseconds: number) => { queryDelayMs = milliseconds; },
@@ -154,6 +176,42 @@ test("ai-memory config uses explicit paired scope and TOML, never a guessed dire
   expect(fromEnv).toMatchObject({ url: "http://127.0.0.1:8877/mcp", scope: { workspace: "override-team", project: "override-project" }, authToken: "secret-test-value" });
   expect(() => getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_WORKSPACE: "partial" })).toThrow();
   expect(getAiMemoryConfig(tempRoot, {}).scope).toBeNull();
+});
+
+test("ai-memory auth resolves from the explicit token file or configured vault without displacing env tokens", async () => {
+  const vault = join(tempRoot, "vault-token-test");
+  await mkdir(vault, { recursive: true });
+  const tokenPath = join(vault, "auth-token");
+  await writeFile(tokenPath, "  file-token-test-value\r\n", "utf8");
+
+  expect(getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_TOKEN_FILE: tokenPath }).authToken).toBe("file-token-test-value");
+  expect(getAiMemoryConfig(tempRoot, { AI_MEMORY_DATA_DIR: vault }).authToken).toBe("file-token-test-value");
+  expect(getAiMemoryConfig(tempRoot, {
+    TYRANT_AI_MEMORY_AUTH_TOKEN: "  env-token-test-value  ",
+    TYRANT_AI_MEMORY_TOKEN_FILE: join(vault, "does-not-exist"),
+  }).authToken).toBe("env-token-test-value");
+});
+
+test("ai-memory rejects missing, linked, and oversized configured token files without exposing contents", async () => {
+  const vault = join(tempRoot, "invalid-vault-token-test");
+  await mkdir(vault, { recursive: true });
+  const missingPath = join(vault, "missing-token");
+  expect(() => getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_TOKEN_FILE: missingPath })).toThrow("token_file_missing");
+
+  const target = join(vault, "target-token");
+  const linkPath = join(vault, "linked-token");
+  await writeFile(target, "linked-token-secret-test-value", "utf8");
+  try {
+    await symlink(target, linkPath);
+    expect(() => getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_TOKEN_FILE: linkPath })).toThrow("token_file_not_regular");
+  } catch (error) {
+    if (!(error instanceof Error) || !["EPERM", "EACCES", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+  }
+
+  const oversizedPath = join(vault, "oversized-token");
+  await writeFile(oversizedPath, "x".repeat(20_000), "utf8");
+  expect(() => getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_TOKEN_FILE: oversizedPath })).toThrow("token_file_too_large");
+  expect(() => getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_TOKEN_FILE: oversizedPath })).not.toThrow("x".repeat(20_000));
 });
 
 test("context load initializes one marker, uses auth, bounds results, and only accepts the exact resumed task handoff", async () => {
@@ -251,6 +309,127 @@ test("provider connection failures return safe status without exposing endpoint 
   expect(timedOut.errorCode).toBe("provider_error");
   expect(JSON.stringify({ loaded, synced, timedOut })).not.toContain(secret);
 });
+test("outcome sync identifies the failed MCP method without returning raw RPC details", async () => {
+  const fixture = await createMemoryFixture();
+  const secret = "rpc-detail-secret-that-must-not-leak";
+  fixture.failNextToolCall("memory_write_page", -32602, "Invalid parameters: " + secret);
+  const provider = new AiMemoryProvider(configFor(fixture.url));
+  const result = await provider.syncOutcome({
+    taskId: "task-rpc-failure", lifecycleState: "completed", summary: "Persist the task result",
+  });
+
+  expect(result).toMatchObject({
+    status: "incomplete",
+    errorCode: "rpc_n32602",
+    failedOperation: "memory_write_page",
+  });
+  expect(fixture.calls.map((call) => call.name)).toContain("memory_write_page");
+  expect(JSON.stringify(result)).not.toContain(secret);
+  expect(JSON.stringify(result)).not.toContain("Invalid parameters");
+});
+
+test("generic AI-Memory calls apply project defaults while preserving explicit destinations and profile scope", async () => {
+  const fixture = await createMemoryFixture();
+  const provider = new AiMemoryProvider(configFor(fixture.url));
+
+  await provider.invokeTool("memory_briefing", { settled_first: true }, "session-proxy-1");
+  expect(fixture.calls.at(-1)).toEqual({
+    name: "memory_briefing", args: { workspace: "tyrant-test", project: "sample", settled_first: true },
+  });
+
+  await provider.invokeTool("memory_briefing", { workspace: "archive", project: "old-project" });
+  expect(fixture.calls.at(-1)).toEqual({ name: "memory_briefing", args: { workspace: "archive", project: "old-project" } });
+
+  await provider.invokeTool("memory_delete_page", { path: "profile/preferences.md", scope: "profile" });
+  expect(fixture.calls.at(-1)).toEqual({ name: "memory_delete_page", args: { path: "profile/preferences.md", scope: "profile" } });
+
+  await provider.invokeTool("memory_delete_page", { path: "_global/policy.md", scope: "global" });
+  expect(fixture.calls.at(-1)).toEqual({ name: "memory_delete_page", args: { path: "_global/policy.md", scope: "global" } });
+});
+
+test("generic AI-Memory calls preserve message destination and default sender scope", async () => {
+  const fixture = await createMemoryFixture();
+  const provider = new AiMemoryProvider(configFor(fixture.url));
+
+  await provider.invokeTool("memory_message_send", {
+    to_workspace: "other-team", to_project: "target", body: "Continue the handoff",
+  });
+
+  expect(fixture.calls.at(-1)).toEqual({
+    name: "memory_message_send",
+    args: {
+      to_workspace: "other-team", to_project: "target", body: "Continue the handoff",
+      from_workspace: "tyrant-test", from_project: "sample",
+    },
+  });
+});
+
+test("unscoped AI-Memory operations work without project scope", async () => {
+  const fixture = await createMemoryFixture();
+  const provider = new AiMemoryProvider({ ...configFor(fixture.url), scope: null });
+
+  const result = await provider.invokeTool("memory_install_self_routing", { compact: true });
+
+  expect(result.isError).toBeFalsy();
+  expect(fixture.calls.at(-1)).toEqual({ name: "memory_install_self_routing", args: { compact: true } });
+});
+
+test("generic AI-Memory proxy redacts and bounds results and returns safe errors", async () => {
+  const fixture = await createMemoryFixture();
+  const provider = new AiMemoryProvider(configFor(fixture.url));
+  const secret = "proxy-secret-token-should-not-leak";
+  fixture.setProxyPayload({ credential: `Authorization: Bearer ${secret}`, large: "x".repeat(120_000) });
+
+  const large = await provider.invokeTool("memory_briefing", {});
+  const largeText = (large.content as Array<{ type: string; text?: string }>).find((item) => item.type === "text")?.text ?? "";
+  expect(largeText.length).toBeLessThanOrEqual(100_100);
+  expect(largeText).not.toContain(secret);
+
+  fixture.failNextToolCall("memory_briefing", -32602, `Authorization: Bearer ${secret}`);
+  const failed = await provider.invokeTool("memory_briefing", {});
+  expect(failed.isError).toBe(true);
+  expect(JSON.stringify(failed)).not.toContain(secret);
+  expect(JSON.stringify(failed)).toContain("rpc_n32602");
+});
+
+test("outcome sync treats ai-memory's scoped missing-page RPC as a first-write case", async () => {
+  const fixture = await createMemoryFixture();
+  const taskId = "12345678-1234-1234-1234-123456789abc";
+  const pagePath = `tyrant/tasks/${taskId}.md`;
+  fixture.failNextToolCall(
+    "memory_read_page",
+    -32602,
+    `page ${pagePath} not found in resolved scope tyrant-test/sample`,
+  );
+  const provider = new AiMemoryProvider(configFor(fixture.url));
+
+  const result = await provider.syncOutcome({
+    taskId, lifecycleState: "completed", summary: "Persist the task result",
+  });
+
+  expect(result.status).toBe("synced");
+  expect(result.errorCode).toBeUndefined();
+  expect(fixture.pages.get(`tyrant-test/sample/${pagePath}`)?.body).toContain("Persist the task result");
+  expect(fixture.calls.some((call) => call.name === "memory_write_page" && call.args.path === pagePath && call.args.create_only === true)).toBe(true);
+});
+
+test("outcome sync does not treat unrelated read-page invalid params as a missing page", async () => {
+  const fixture = await createMemoryFixture();
+  const taskId = "task-invalid-read-params";
+  fixture.failNextToolCall("memory_read_page", -32602, "memory_read_page requires exactly one of path or query");
+  const provider = new AiMemoryProvider(configFor(fixture.url));
+
+  const result = await provider.syncOutcome({
+    taskId, lifecycleState: "completed", summary: "Persist the task result",
+  });
+
+  expect(result).toMatchObject({
+    status: "incomplete", errorCode: "rpc_n32602", failedOperation: "memory_read_page",
+  });
+  expect(fixture.pages.has(`tyrant-test/sample/tyrant/tasks/${taskId}.md`)).toBe(false);
+  expect(fixture.calls.some((call) => call.name === "memory_write_page" && call.args.path === `tyrant/tasks/${taskId}.md`)).toBe(false);
+});
+
 test("outcome sync uses conditional page writes and creates one marked handoff", async () => {
   const fixture = await createMemoryFixture();
   const provider = new AiMemoryProvider(configFor(fixture.url));

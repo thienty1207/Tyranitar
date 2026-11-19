@@ -52,6 +52,8 @@ A skill being installed or recommended is never proof that the agent followed it
 
 Tyrant owns active task state. ai-memory provides required project history and handoffs, not authority to overwrite approved project decisions. Graphify provides the required derived code map and can be rebuilt from files.
 
+Tyrant keeps named AI-Memory vault profiles and one active default in a per-user registry. Running `tyrant setup` inside a vault selects that vault; `tyrant setup <path>` selects the given vault from anywhere. The selection applies to future `tyrant init` operations across the user's projects. `tyrant init` saves the selected profile and a stable, project-specific AI-Memory scope. Changing the active default never rebinds an initialized project; it continues using its saved profile until the user explicitly rebinds it. Several projects may share one profile while retaining separate scopes. Graphify output remains local to each repository.
+
 ## 6. Initial routing policy
 
 Matt Pocock’s engineering workflow is Tyrant’s **core orchestration skill family**, analogous to Superpowers in Baron. For every eligible software-development task, Tyrant routes the agent through the relevant Matt Pocock workflow first: understand the request, establish scope and constraints, choose a work sequence, and maintain engineering feedback. This is the default orchestration path, not an optional specialist route. If the host cannot load the native skill, Tyrant must report the limitation and use only a documented fallback rather than claim the skill ran.
@@ -82,4 +84,4 @@ Cross-platform distribution is a product goal. Windows is the first development 
 
 ## 9. Open decisions
 
-Before implementation, decide package/update format, whether Tyrant installs or references skill bundles, the smallest suitable local state store, exact pinned-client hook capabilities, and whether shared remote hosting is needed. Local-only is the MVP assumption.
+Remaining decisions are the release/update format, exact pinned-client hook capabilities, and whether shared remote hosting is needed. Vault-profile selection, project binding, and pinned skill installation are specified in SPEC-03 and SPEC-06. Local-only is the MVP assumption.

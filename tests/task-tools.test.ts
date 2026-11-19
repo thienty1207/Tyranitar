@@ -14,9 +14,18 @@ const stateDirectory = join(sandbox, "state");
 const quotaStateDirectory = join(sandbox, "quota-state");
 const projectA = join(sandbox, "project-a");
 const projectB = join(sandbox, "project-b");
+const autoSessionProject = join(sandbox, "auto-session-project");
+const autoRetryProject = join(sandbox, "auto-retry-project");
+const autoHandoffProject = join(sandbox, "auto-handoff-project");
+const autoAmbiguousProject = join(sandbox, "auto-ambiguous-project");
+const providerRecoveryProvenanceProject = join(sandbox, "provider-recovery-provenance-project");
 const legacyStateDirectory = join(sandbox, "legacy-state");
 const legacyProject = join(sandbox, "legacy-project");
-await Promise.all([mkdir(stateDirectory), mkdir(quotaStateDirectory), mkdir(projectA), mkdir(projectB), mkdir(legacyStateDirectory), mkdir(legacyProject)]);
+await Promise.all([
+  mkdir(stateDirectory), mkdir(quotaStateDirectory), mkdir(projectA), mkdir(projectB),
+  mkdir(autoSessionProject), mkdir(autoRetryProject), mkdir(autoHandoffProject), mkdir(autoAmbiguousProject), mkdir(providerRecoveryProvenanceProject),
+  mkdir(legacyStateDirectory), mkdir(legacyProject),
+]);
 
 const priorStateDirectory = process.env.TYRANT_STATE_DIR;
 const priorProjectRoot = process.env.TYRANT_PROJECT_ROOT;
@@ -183,6 +192,59 @@ test("resumed tasks refresh Graphify state and keep an explicit transition after
     expect(resumed.task.lifecycle_state).toBe("blocked");
     expect(resumed.next_action).toContain("explicit transition");
     expect(resumed.events.filter((event: any) => event.event_type === "graphify_context_loaded")).toHaveLength(2);
+  } finally {
+    await close();
+  }
+});
+
+test("task state keeps the latest blocking transition after it leaves the bounded event window", async () => {
+  const aiMemory = {
+    async loadContext() {
+      return { status: "ready", context: "[historical_untrusted] Existing project notes.", references: [], handoffStatus: "none" };
+    },
+    async syncOutcome() { return { status: "synced", handoffStatus: "not_required" }; },
+  };
+  const { client, close } = await openClient(providerRecoveryProvenanceProject, stateDirectory, aiMemory);
+  try {
+    const task = "Implement a provider-backed change";
+    const initial = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: { schema_version: 1, task, request_id: "aged-block-prepare-001", host_id: "codex", session_id: "aged-block-session" },
+    }));
+    const taskId = initial.task.id as string;
+    expect(initial.task.lifecycle_state).toBe("blocked");
+
+    for (const [request_id, next_state, reason] of [
+      ["aged-block-planned", "planned", "Providers were available; plan the task"],
+      ["aged-block-started", "in_progress", "Begin implementation"],
+      ["aged-block-blocked", "blocked", "A required test failed; stop implementation"],
+    ]) {
+      await client.callTool({
+        name: "tyrant_transition_task",
+        arguments: { schema_version: 1, task_id: taskId, request_id, next_state, reason },
+      });
+    }
+
+    for (let index = 0; index < 12; index += 1) {
+      await client.callTool({
+        name: "tyrant_prepare_task",
+        arguments: {
+          schema_version: 1, task_id: taskId, task,
+          request_id: `aged-block-refresh-${String(index).padStart(2, "0")}`,
+          host_id: "codex", session_id: "aged-block-session",
+        },
+      });
+    }
+
+    const state = parseToolResult(await client.callTool({
+      name: "tyrant_get_task", arguments: { schema_version: 1, task_id: taskId },
+    }));
+    expect(state.task.lifecycle_state).toBe("blocked");
+    expect(state.events).toHaveLength(20);
+    expect(state.events.some((event: any) => event.summary === "A required test failed; stop implementation")).toBe(false);
+    expect(state.latest_block_event).toMatchObject({
+      event_type: "task_state_changed", new_state: "blocked", summary: "A required test failed; stop implementation",
+    });
   } finally {
     await close();
   }
@@ -500,7 +562,7 @@ test("frontend and security requests add their relevant skill routes", async () 
         request_id: "prepare-specialists-001",
       },
     }));
-    expect(prepared.route.specialists.map((skill: any) => [skill.skill_id, skill.required])).toEqual([["matt-tdd", false], ["design-taste-frontend", true], ["security-audit", false], ["matt-code-review", false]]);
+    expect(prepared.route.specialists.map((skill: any) => [skill.skill_id, skill.required])).toEqual([["matt-tdd", true], ["design-taste-frontend", true], ["security-audit", false], ["matt-code-review", false]]);
     expect(prepared.route.specialists.find((skill: any) => skill.skill_id === "security-audit")).toMatchObject({ status: "recommended", mode: "guidance" });
   } finally {
     await close();
@@ -992,6 +1054,321 @@ test("explicit memory retry updates continuity without replaying a task transiti
   }
 });
 
+test("failed ai-memory RPC operation is durable in task state and the event log", async () => {
+  const aiMemory = {
+    async loadContext() {
+      return { status: "ready", context: "", references: [], handoffStatus: "none" };
+    },
+    async syncOutcome() {
+      return {
+        status: "incomplete", handoffStatus: "not_required",
+        errorCode: "rpc_n32602", failedOperation: "memory_write_page",
+      };
+    },
+  };
+  const graphify = {
+    async loadContext() {
+      return { status: "ready", mapStatus: "current", context: "Current-code map ready.", references: [] };
+    },
+  };
+  const { client, close } = await openClient(projectB, stateDirectory, aiMemory, graphify);
+  try {
+    const prepared = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: { schema_version: 1, task: "Add provider sync diagnostics", request_id: "memory-error-step-prepare-001" },
+    }));
+    const finished = parseToolResult(await client.callTool({
+      name: "tyrant_finish_task",
+      arguments: {
+        schema_version: 1, task_id: prepared.task.id, request_id: "memory-error-step-finish-001",
+        status: "completed", summary: "Record the AI Memory outcome",
+      },
+    }));
+    expect(finished.ai_memory_sync).toMatchObject({
+      status: "incomplete", errorCode: "rpc_n32602", failedOperation: "memory_write_page",
+    });
+    expect(finished.task.ai_memory).toMatchObject({
+      sync_status: "incomplete", error_code: "rpc_n32602", error_step: "memory_write_page",
+    });
+
+    const retried = parseToolResult(await client.callTool({
+      name: "tyrant_sync_memory",
+      arguments: { schema_version: 1, task_id: prepared.task.id, request_id: "memory-error-step-retry-001" },
+    }));
+    expect(retried.ai_memory_sync).toMatchObject({
+      status: "incomplete", errorCode: "rpc_n32602", failedOperation: "memory_write_page",
+    });
+    expect(retried.task.lifecycle_state).toBe("completed");
+    expect(retried.task.ai_memory.error_step).toBe("memory_write_page");
+
+    const reread = parseToolResult(await client.callTool({
+      name: "tyrant_get_task",
+      arguments: { schema_version: 1, task_id: prepared.task.id },
+    }));
+    const failureEvent = reread.events.find((event: any) => event.event_type === "memory_sync_failed");
+    expect(failureEvent.summary).toContain("rpc_n32602");
+    expect(failureEvent.summary).toContain("memory_write_page");
+  } finally {
+    await close();
+  }
+});
+
+test("automatic preparation reuses the active task for one host session before loading providers", async () => {
+  const memoryCalls: Array<{ taskId?: string; summary: string; resume: boolean; sessionId?: string }> = [];
+  const aiMemory = {
+    async loadContext(input: { taskId?: string; summary: string; resume: boolean; sessionId?: string }) {
+      memoryCalls.push(input);
+      return { status: "ready", context: "Prior project decisions", references: ["ai-memory:page:project"], handoffStatus: "none" };
+    },
+    async syncOutcome() { return { status: "synced", handoffStatus: "not_required" }; },
+  };
+  const graphify = {
+    async loadContext() { return { status: "ready", mapStatus: "current", context: "Current code map", references: ["graphify:graph:current"] }; },
+  };
+  const { client, close } = await openClient(autoSessionProject, stateDirectory, aiMemory, graphify);
+  try {
+    const first = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: {
+        schema_version: 1, task: "Build a list endpoint", request_id: "auto-session-first-001",
+        host_id: "codex", session_id: "session-auto-001", resume_session: true,
+      },
+    }));
+    const second = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: {
+        schema_version: 1, task: "Add pagination to the list endpoint", request_id: "auto-session-second-001",
+        host_id: "codex", session_id: "session-auto-001", resume_session: true,
+      },
+    }));
+
+    expect(second.task.id).toBe(first.task.id);
+    expect(memoryCalls).toEqual([
+      { taskId: undefined, summary: "Build a list endpoint", resume: false, sessionId: "session-auto-001" },
+      { taskId: first.task.id, summary: "Add pagination to the list endpoint", resume: true, sessionId: "session-auto-001" },
+    ]);
+    expect(second.events.filter((event: any) => event.event_type === "task_created")).toHaveLength(1);
+    expect(second.checkpoint.session_id).toBe("session-auto-001");
+  } finally {
+    await close();
+  }
+});
+
+test("an exact automatic first-prompt retry does not conflict after its task was created", async () => {
+  let memoryLoadCount = 0;
+  const aiMemory = {
+    async loadContext() {
+      memoryLoadCount += 1;
+      return {
+        status: "ready", context: "Prior project decisions",
+        references: [memoryLoadCount === 1 ? "ai-memory:page:marker" : "ai-memory:path:tyrant/project.md"],
+        handoffStatus: "none",
+      };
+    },
+    async syncOutcome() { return { status: "synced", handoffStatus: "not_required" }; },
+  };
+  const graphify = {
+    async loadContext() {
+      return { status: "ready", mapStatus: "current", context: "Current code map", references: ["graphify:graph:current"] };
+    },
+  };
+  const { client, close } = await openClient(autoRetryProject, stateDirectory, aiMemory, graphify);
+  const request = {
+    schema_version: 1, task: "Create the project list endpoint", request_id: "auto-first-prompt-retry-001",
+    host_id: "codex", session_id: "session-auto-first-retry", resume_session: true,
+  };
+  try {
+    const first = parseToolResult(await client.callTool({ name: "tyrant_prepare_task", arguments: request }));
+    const retriedCall = await client.callTool({ name: "tyrant_prepare_task", arguments: request });
+
+    expect(retriedCall.isError).toBeFalsy();
+    const retry = parseToolResult(retriedCall);
+    expect(retry.task.id).toBe(first.task.id);
+    expect(retry.events.filter((event: any) => event.event_type === "task_created")).toHaveLength(1);
+    expect(memoryLoadCount).toBe(2);
+  } finally {
+    await close();
+  }
+});
+
+test("automatic preparation carries one claimed handoff and its local checkpoint into a fresh task", async () => {
+  const memoryCalls: Array<{ taskId?: string; resume: boolean }> = [];
+  const aiMemory = {
+    async loadContext(input: { taskId?: string; resume: boolean }) {
+      memoryCalls.push(input);
+      return input.resume
+        ? { status: "ready", context: "Prior handoff summary", references: ["ai-memory:handoff:handoff-auto"], handoffStatus: "claimed" }
+        : { status: "ready", context: "Prior context", references: [], handoffStatus: "none" };
+    },
+    async syncOutcome() { return { status: "synced", handoffStatus: "created", handoffId: "handoff-auto" }; },
+  };
+  const graphify = {
+    async loadContext() { return { status: "ready", mapStatus: "current", context: "Current code map", references: [] }; },
+  };
+  const { client, close } = await openClient(autoHandoffProject, stateDirectory, aiMemory, graphify);
+  try {
+    const first = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: {
+        schema_version: 1, task: "Implement the first change", request_id: "auto-session-handoff-first",
+        host_id: "codex", session_id: "session-auto-handoff", resume_session: true,
+      },
+    }));
+    await client.callTool({
+      name: "tyrant_checkpoint",
+      arguments: {
+        schema_version: 1, task_id: first.task.id, request_id: "auto-session-handoff-checkpoint",
+        phase: "implementation", last_reliable_step: "Added the list route", next_action: "Add pagination tests",
+        changed_files: ["src/routes/list.ts"], evidence_refs: ["test://list-route"],
+      },
+    });
+    await client.callTool({
+      name: "tyrant_finish_task",
+      arguments: {
+        schema_version: 1, task_id: first.task.id, request_id: "auto-session-handoff-finish",
+        status: "handoff", summary: "Pause the first change", next_action: "Continue in a new task",
+        host_id: "codex", session_id: "session-auto-handoff",
+      },
+    });
+    const second = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: {
+        schema_version: 1, task: "Start a separate follow-up", request_id: "auto-session-handoff-second",
+        host_id: "codex", session_id: "session-auto-handoff-new", resume_session: true,
+      },
+    }));
+    const source = parseToolResult(await client.callTool({
+      name: "tyrant_get_task", arguments: { schema_version: 1, task_id: first.task.id },
+    }));
+
+    expect(second.task.id).not.toBe(first.task.id);
+    expect(second.task.lifecycle_state).toBe("planned");
+    expect(memoryCalls.at(-1)).toMatchObject({ taskId: first.task.id, resume: true, sessionId: "session-auto-handoff-new" });
+    expect(second.memory_context).toMatchObject({ status: "ready", handoffStatus: "claimed" });
+    expect(second.resume_context).toMatchObject({
+      source_task_id: first.task.id,
+      checkpoint: {
+        phase: "implementation", last_reliable_step: "Added the list route",
+        next_action: "Add pagination tests", changed_files: ["src/routes/list.ts"], evidence_refs: ["test://list-route"],
+      },
+    });
+    expect(source.events.some((event: any) => event.event_type === "memory_handoff_claimed" && event.evidence_refs.includes(`tyrant-task:${second.task.id}`))).toBe(true);
+  } finally {
+    await close();
+  }
+});
+
+test("automatic preparation blocks when multiple unclaimed handoffs make resume ambiguous", async () => {
+  let resumeCalls = 0;
+  const aiMemory = {
+    async loadContext(input: { resume: boolean }) {
+      if (input.resume) resumeCalls += 1;
+      return { status: "ready", context: "Prior context", references: [], handoffStatus: input.resume ? "claimed" : "none" };
+    },
+    async syncOutcome() { return { status: "synced", handoffStatus: "created", handoffId: "handoff-ambiguous" }; },
+  };
+  const graphify = {
+    async loadContext() { return { status: "ready", mapStatus: "current", context: "Current code map", references: [] }; },
+  };
+  const { client, close } = await openClient(autoAmbiguousProject, stateDirectory, aiMemory, graphify);
+  try {
+    for (let index = 0; index < 2; index += 1) {
+      const prepared = parseToolResult(await client.callTool({
+        name: "tyrant_prepare_task",
+        arguments: { schema_version: 1, task: `Create handoff ${index}`, request_id: `ambiguous-source-${index}`, host_id: "codex", session_id: `ambiguous-session-${index}` },
+      }));
+      await client.callTool({ name: "tyrant_finish_task", arguments: {
+        schema_version: 1, task_id: prepared.task.id, request_id: `ambiguous-finish-${index}`,
+        status: "handoff", summary: `Pause task ${index}`, next_action: "Continue later",
+      } });
+    }
+    const fresh = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: { schema_version: 1, task: "Continue project work", request_id: "ambiguous-fresh-session", host_id: "codex", session_id: "ambiguous-session-new", resume_session: true },
+    }));
+    expect(fresh.memory_context).toMatchObject({ status: "incomplete", handoffStatus: "ambiguous", errorCode: "handoff_ambiguous" });
+    expect(fresh.route.code_change_gate.status).toBe("blocked");
+    expect(resumeCalls).toBe(0);
+  } finally {
+    await close();
+  }
+});
+
+test("a fresh host session automatically retries an incomplete local handoff sync before claiming it", async () => {
+  const handoffProject = join(sandbox, "project-handoff-sync-retry");
+  const handoffState = join(sandbox, "state-handoff-sync-retry");
+  await Promise.all([mkdir(handoffProject), mkdir(handoffState)]);
+  let syncCalls = 0;
+  const memoryResumeCalls: string[] = [];
+  const aiMemory = {
+    async loadContext(input: { taskId?: string; resume: boolean }) {
+      if (input.resume && input.taskId) memoryResumeCalls.push(input.taskId);
+      return input.resume
+        ? { status: "ready", context: "Recovered handoff", references: ["ai-memory:handoff:retry-handoff"], handoffStatus: "claimed" }
+        : { status: "ready", context: "Project history", references: [], handoffStatus: "none" };
+    },
+    async syncOutcome() {
+      syncCalls += 1;
+      return syncCalls === 1
+        ? { status: "incomplete", handoffStatus: "uncertain", errorCode: "provider_timeout" }
+        : { status: "synced", handoffStatus: "created", handoffId: "retry-handoff" };
+    },
+  };
+  const graphify = {
+    async loadContext() { return { status: "ready", mapStatus: "current", context: "Current code map", references: [] }; },
+  };
+  const { client, close } = await openClient(handoffProject, handoffState, aiMemory, graphify);
+  try {
+    const first = parseToolResult(await client.callTool({ name: "tyrant_prepare_task", arguments: {
+      schema_version: 1, task: "Implement the first part", request_id: "sync-retry-source", host_id: "codex", session_id: "sync-retry-old",
+    } }));
+    const finish = parseToolResult(await client.callTool({ name: "tyrant_finish_task", arguments: {
+      schema_version: 1, task_id: first.task.id, request_id: "sync-retry-finish", status: "handoff",
+      summary: "Paused before database integration", next_action: "Continue database integration",
+    } }));
+    expect(finish.task.ai_memory.sync_status).toBe("uncertain");
+
+    const second = parseToolResult(await client.callTool({ name: "tyrant_prepare_task", arguments: {
+      schema_version: 1, task: "Continue database integration", request_id: "sync-retry-new-session",
+      host_id: "codex", session_id: "sync-retry-new", resume_session: true,
+    } }));
+
+    expect(syncCalls).toBe(2);
+    expect(memoryResumeCalls).toEqual([first.task.id]);
+    expect(second.task.id).not.toBe(first.task.id);
+    expect(second.memory_context).toMatchObject({ status: "ready", handoffStatus: "claimed" });
+    expect(second.resume_context.source_task_id).toBe(first.task.id);
+  } finally {
+    await close();
+  }
+});
+
+test("task lookup by host and session never falls back to another session's latest task", async () => {
+  const { client, close } = await openClient(projectA);
+  try {
+    const prepared = parseToolResult(await client.callTool({
+      name: "tyrant_prepare_task",
+      arguments: {
+        schema_version: 1, task: "Task for one session", request_id: "session-lookup-prepare",
+        host_id: "claude-code", session_id: "session-lookup-one",
+      },
+    }));
+    const found = parseToolResult(await client.callTool({
+      name: "tyrant_get_task",
+      arguments: { schema_version: 1, host_id: "claude-code", session_id: "session-lookup-one" },
+    }));
+    const missing = await client.callTool({
+      name: "tyrant_get_task",
+      arguments: { schema_version: 1, host_id: "claude-code", session_id: "session-lookup-other" },
+    });
+
+    expect(found.task.id).toBe(prepared.task.id);
+    expect(missing.isError).toBe(true);
+  } finally {
+    await close();
+  }
+});
+
 
 
 
@@ -1024,7 +1401,7 @@ test("SPEC-03 database migration preserves legacy tasks, checkpoints, and events
       expect(store.getTask("legacy-handoff").task.lifecycle_state).toBe("handoff");
       expect(store.getTask("legacy-completed").task.lifecycle_state).toBe("completed");
       expect(store.getTask("legacy-active")).toMatchObject({
-        task: { summary: "Legacy active", status: "active" },
+        task: { summary: "Legacy active", status: "active", ai_memory: { error_step: null } },
         checkpoint: { phase: "implementation", last_reliable_step: "Old reliable step", next_action: "Old next action", changed_files: ["src/old.ts"], evidence_refs: ["test://old"] },
       });
       expect(store.getTask("legacy-active").events).toContainEqual(expect.objectContaining({ id: "legacy-event", event_type: "checkpoint_saved", summary: "Old checkpoint event" }));

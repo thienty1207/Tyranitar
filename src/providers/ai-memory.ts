@@ -1,14 +1,18 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { redactSensitiveText } from "../state/redaction";
+import { AI_MEMORY_UPSTREAM_TOOLS } from "./ai-memory-tool-contract";
 
 const DEFAULT_URL = "http://127.0.0.1:49374/mcp";
 const MAX_CONTEXT_CHARS = 6_000;
 const MAX_HIT_CHARS = 1_200;
 const MAX_OUTCOME_CHARS = 4_000;
+const MAX_PROXY_RESULT_CHARS = 100_000;
 const TIMEOUT_MS = 8_000;
 const PROJECT_MARKER_PATH = "tyrant/project.md";
+const DEFAULT_DATA_DIR = "D:\\AI-MEMORY";
+const MAX_AUTH_TOKEN_FILE_BYTES = 16_384;
 
 type Scope = { workspace: string; project: string };
 export type AiMemoryConfig = {
@@ -43,12 +47,13 @@ export type MemoryOutcomeResult = {
   handoffStatus: "created" | "existing" | "uncertain" | "not_required";
   handoffId?: string;
   errorCode?: string;
+  failedOperation?: string;
 };
 
 type ToolPayload = Record<string, unknown>;
 
 class MemoryCallError extends Error {
-  constructor(readonly code: string, readonly payload?: unknown) {
+  constructor(readonly code: string, readonly payload?: unknown, readonly failedOperation?: string) {
     super(code);
     this.name = "MemoryCallError";
   }
@@ -83,10 +88,46 @@ function readProjectScope(projectRoot: string): Scope | null {
   }
 }
 
+function readAuthTokenFile(path: string): string {
+  let info;
+  try {
+    info = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("token_file_missing");
+    throw new Error("token_file_unreadable");
+  }
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("token_file_not_regular");
+  if (info.size > MAX_AUTH_TOKEN_FILE_BYTES) throw new Error("token_file_too_large");
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    throw new Error("token_file_unreadable");
+  }
+  if (bytes.length > MAX_AUTH_TOKEN_FILE_BYTES) throw new Error("token_file_too_large");
+  const token = bytes.toString("utf8").trim();
+  if (!token) throw new Error("token_file_empty");
+  if (/[\u0000-\u001f\u007f]/.test(token)) throw new Error("token_file_invalid");
+  return token;
+}
+
 export function getAiMemoryConfig(projectRoot = process.env.TYRANT_PROJECT_ROOT || process.cwd(), env: Record<string, string | undefined> = process.env): AiMemoryConfig {
   const resolvedRoot = resolve(projectRoot);
   const url = normalizeUrl(env.TYRANT_AI_MEMORY_URL?.trim() || env.AI_MEMORY_SERVER_URL?.trim() || DEFAULT_URL);
-  const authToken = env.TYRANT_AI_MEMORY_AUTH_TOKEN?.trim() || env.AI_MEMORY_AUTH_TOKEN?.trim() || undefined;
+  const explicitToken = env.TYRANT_AI_MEMORY_AUTH_TOKEN?.trim() || env.AI_MEMORY_AUTH_TOKEN?.trim();
+  const explicitTokenFile = env.TYRANT_AI_MEMORY_TOKEN_FILE?.trim() || env.AI_MEMORY_TOKEN_FILE?.trim();
+  const configuredDataDir = env.AI_MEMORY_DATA_DIR?.trim();
+  let authToken = explicitToken || undefined;
+  if (!authToken) {
+    const tokenPath = explicitTokenFile ? resolve(explicitTokenFile) : join(resolve(configuredDataDir || DEFAULT_DATA_DIR), "auth-token");
+    try {
+      authToken = readAuthTokenFile(tokenPath);
+    } catch (error) {
+      const isOptionalDefaultMissing = !explicitTokenFile && !configuredDataDir
+        && error instanceof Error && error.message === "token_file_missing";
+      if (!isOptionalDefaultMissing) throw error;
+    }
+  }
   const envWorkspace = env.TYRANT_AI_MEMORY_WORKSPACE?.trim();
   const envProject = env.TYRANT_AI_MEMORY_PROJECT?.trim();
   let scope: Scope | null;
@@ -124,12 +165,17 @@ function decodeResult(result: { structuredContent?: unknown; content: Array<{ ty
   return result.isError ? { error: "tool_failed" } : {};
 }
 
-const KNOWN_ERROR_CODES = new Set(["page_not_found", "not_found", "missing_page", "precondition_failed", "scope_missing", "unauthorized", "forbidden", "tool_failed"]);
+const KNOWN_ERROR_CODES = new Set([
+  "page_not_found", "not_found", "missing_page", "precondition_failed", "scope_missing", "scope_incomplete",
+  "unauthorized", "forbidden", "tool_failed", "provider_error", "invalid_config", "invalid_url", "insecure_remote_url",
+  "token_file_missing", "token_file_not_regular", "token_file_too_large", "token_file_empty", "token_file_invalid", "token_file_unreadable",
+]);
 
 function normalizeErrorCode(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const code = value.trim().toLowerCase();
   if (KNOWN_ERROR_CODES.has(code)) return code;
+  if (/^rpc_[a-z0-9]{1,16}$/.test(code)) return code;
   if (/^-?\d{1,8}$/.test(code)) return `rpc_${code.replace("-", "n")}`;
   if (/page.{0,20}not found|not found.{0,20}page/.test(code)) return "page_not_found";
   if (/scope.{0,20}(missing|not found)|workspace.{0,20}project/.test(code)) return "scope_missing";
@@ -140,7 +186,12 @@ function payloadError(payload: ToolPayload): string | undefined {
   const error = payload.error;
   if (typeof error === "string") return normalizeErrorCode(error);
   const nested = toRecord(error);
-  if (nested) return normalizeErrorCode(stringValue(nested.code) ?? stringValue(nested.message));
+  if (nested) {
+    const nestedCode = typeof nested.code === "number" && Number.isFinite(nested.code)
+      ? String(nested.code)
+      : stringValue(nested.code);
+    return normalizeErrorCode(nestedCode ?? stringValue(nested.message));
+  }
   return undefined;
 }
 
@@ -168,13 +219,105 @@ function isNotFoundError(error: unknown): boolean {
   if (error instanceof MemoryCallError && ["page_not_found", "not_found", "missing_page"].includes(error.code)) return true;
   const data = errorData(error);
   if (data && isNotFoundPayload(data)) return true;
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  return /page.{0,20}not found|not found.{0,20}page|page_not_found/.test(message);
+  const record = toRecord(error);
+  const nestedError = toRecord(data?.error);
+  const nestedData = toRecord(nestedError?.data);
+  const messages = [
+    error instanceof Error ? error.message : undefined,
+    stringValue(record?.message),
+    stringValue(data?.message),
+    stringValue(nestedError?.message),
+    stringValue(nestedData?.message),
+  ].filter((message): message is string => !!message);
+  return messages.some((message) =>
+    /page.{0,512}not found|not found.{0,512}page|page_not_found/i.test(message),
+  );
 }
 function bounded(value: unknown, max: number): string {
   if (typeof value !== "string") return "";
   const safe = redactSensitiveText(value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " "));
+  if (max <= 0) return safe ? "[TRUNCATED]" : "";
   return safe.length <= max ? safe : `${safe.slice(0, max - 1)}…`;
+}
+
+function sanitizeProxyValue(value: unknown, budget: { remaining: number }): unknown {
+  if (typeof value === "string") {
+    const max = Math.max(0, budget.remaining);
+    const safe = bounded(value, max);
+    budget.remaining = Math.max(0, budget.remaining - safe.length);
+    return safe;
+  }
+  if (Array.isArray(value)) {
+    const items: unknown[] = [];
+    for (const item of value) {
+      if (budget.remaining <= 0) break;
+      budget.remaining -= 1;
+      items.push(sanitizeProxyValue(item, budget));
+    }
+    return items.length < value.length ? [...items, { tyrant_truncated: true }] : items;
+  }
+  if (typeof value === "object" && value !== null) {
+    const safe: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (budget.remaining <= 0) {
+        safe.tyrant_truncated = true;
+        break;
+      }
+      budget.remaining = Math.max(0, budget.remaining - key.length - 1);
+      safe[key] = sanitizeProxyValue(item, budget);
+    }
+    return safe;
+  }
+  return value;
+}
+
+function schemaPropertyNames(schema: Record<string, unknown>): Set<string> {
+  const properties = toRecord(schema.properties);
+  return new Set(properties ? Object.keys(properties) : []);
+}
+
+function applyDefaultProjectScope(schema: Record<string, unknown>, rawArgs: Record<string, unknown>, scope: Scope | null): Record<string, unknown> {
+  const args = { ...rawArgs };
+  const properties = schemaPropertyNames(schema);
+  const explicitNonProjectScope = args.scope === "profile" || args.scope === "global"
+    || args.global === true
+    || (Array.isArray(args.scopes) && args.scopes.some((item) => item === "profile" || item === "global"));
+
+  if (properties.has("from_workspace") || properties.has("from_project")) {
+    const hasSenderScope = args.from_workspace !== undefined || args.from_project !== undefined;
+    if (!hasSenderScope && scope) {
+      if (properties.has("from_workspace")) args.from_workspace = scope.workspace;
+      if (properties.has("from_project")) args.from_project = scope.project;
+    }
+  }
+
+  if (explicitNonProjectScope) return args;
+
+  const hasWorkspace = args.workspace !== undefined && args.workspace !== null && args.workspace !== "";
+  const hasProject = args.project !== undefined && args.project !== null && args.project !== "";
+  const hasProjectId = args.project_id !== undefined && args.project_id !== null && args.project_id !== "";
+  const hasAnyProjectScope = hasWorkspace || hasProject || hasProjectId;
+  if (!hasAnyProjectScope && scope) {
+    if (properties.has("workspace")) args.workspace = scope.workspace;
+    if (properties.has("project")) args.project = scope.project;
+    return args;
+  }
+
+  // Never combine a caller-supplied sibling scope with the Tyrant default.
+  // Let AI-Memory validate explicit partial scopes instead of guessing a destination.
+  if (hasAnyProjectScope) return args;
+  if (!scope && (properties.has("workspace") || properties.has("project") || properties.has("project_id"))) {
+    throw new MemoryCallError("scope_missing");
+  }
+  return args;
+}
+
+function safeProxyError(payload: ToolPayload, operation: string): Record<string, unknown> {
+  const code = payloadError(payload) ?? "tool_failed";
+  return {
+    isError: true,
+    content: [{ type: "text", text: JSON.stringify({ error: { code, operation } }) }],
+  };
 }
 
 function callErrorCode(error: unknown): string {
@@ -226,18 +369,22 @@ export class AiMemoryProvider {
   private readonly config: AiMemoryConfig | null;
   private readonly configError?: string;
 
-  constructor(config?: AiMemoryConfig) {
+  constructor(config?: AiMemoryConfig, projectRoot?: string) {
     try {
-      this.config = config ?? getAiMemoryConfig();
-    } catch {
+      this.config = config ?? getAiMemoryConfig(projectRoot);
+    } catch (error) {
       this.config = null;
-      this.configError = "invalid_config";
+      const safeCode = error instanceof Error && /^token_file_(missing|not_regular|too_large|empty|invalid|unreadable)$/.test(error.message)
+        ? error.message
+        : "invalid_config";
+      this.configError = safeCode;
     }
   }
 
-  private async withClient<T>(sessionId: string | undefined, action: (client: Client, config: AiMemoryConfig) => Promise<T>): Promise<T> {
+  private async withClient<T>(sessionId: string | undefined, action: (client: Client, config: AiMemoryConfig) => Promise<T>, requireScope = true): Promise<T> {
     const config = this.config;
-    if (!config || !config.scope) throw new MemoryCallError(this.configError ?? "scope_missing");
+    if (!config) throw new MemoryCallError(this.configError ?? "invalid_config");
+    if (requireScope && !config.scope) throw new MemoryCallError("scope_missing");
     const headers: Record<string, string> = {};
     if (config.authToken) headers.Authorization = `Bearer ${config.authToken}`;
     if (sessionId) headers["X-Memory-Actor-Session-Id"] = bounded(sessionId, 256);
@@ -254,10 +401,37 @@ export class AiMemoryProvider {
   }
 
   private async call(client: Client, config: AiMemoryConfig, name: string, args: Record<string, unknown>): Promise<ToolPayload> {
-    const result = await client.callTool({ name, arguments: { ...config.scope, ...args } }, { timeout: config.timeoutMs });
-    const payload = decodeResult(result);
-    if (result.isError) throw new MemoryCallError(payloadError(payload) ?? "tool_failed", payload);
-    return payload;
+    try {
+      const result = await client.callTool({ name, arguments: { ...config.scope, ...args } }, { timeout: config.timeoutMs });
+      const payload = decodeResult(result);
+      if (result.isError) throw new MemoryCallError(payloadError(payload) ?? "tool_failed", payload, name);
+      return payload;
+    } catch (error) {
+      if (error instanceof MemoryCallError) {
+        throw new MemoryCallError(error.code, error.payload, error.failedOperation ?? name);
+      }
+      throw new MemoryCallError(callErrorCode(error), errorData(error), name);
+    }
+  }
+
+  async invokeTool(name: string, rawArgs: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
+    const tool = AI_MEMORY_UPSTREAM_TOOLS.find((item) => item.name === name);
+    if (!tool) return safeProxyError({ error: "tool_failed" }, "unknown_tool");
+    if (!this.config) return safeProxyError({ error: this.configError ?? "invalid_config" }, name);
+    try {
+      const args = applyDefaultProjectScope(tool.inputSchema, rawArgs, this.config.scope);
+      const actorSessionId = sessionId ?? stringValue(args.session_id);
+      return await this.withClient(actorSessionId, async (client, config) => {
+        const result = await client.callTool({ name, arguments: args }, { timeout: config.timeoutMs });
+        const payload = decodeResult(result);
+        if (result.isError) return safeProxyError(payload, name);
+        const safeResult = sanitizeProxyValue(result, { remaining: MAX_PROXY_RESULT_CHARS });
+        return toRecord(safeResult) ?? { content: [{ type: "text", text: "{}" }] };
+      }, false);
+    } catch (error) {
+      const payload = errorData(error) ?? { error: callErrorCode(error) };
+      return safeProxyError(payload, error instanceof MemoryCallError ? error.failedOperation ?? name : name);
+    }
   }
 
   private async ensureProjectMarker(client: Client, config: AiMemoryConfig): Promise<string | undefined> {
@@ -271,12 +445,12 @@ export class AiMemoryProvider {
     }
     if (isPreconditionFailure(result)) return undefined;
     const error = payloadError(result);
-    if (error) throw new MemoryCallError(error, result);
+    if (error) throw new MemoryCallError(error, result, "memory_write_page");
     const pageId = stringValue(result.page_id) ?? stringValue(result.id);
     return pageId ? `ai-memory:page:${pageId}` : undefined;
   }
 
-  private async findTaskHandoffs(client: Client, config: AiMemoryConfig, taskId: string): Promise<{ matches: ToolPayload[]; failed: boolean }> {
+  private async findTaskHandoffs(client: Client, config: AiMemoryConfig, taskId: string): Promise<{ matches: ToolPayload[]; failed: boolean; failedOperation?: string }> {
     try {
       const result = await this.call(client, config, "memory_handoff_list", {});
       const marker = `[tyrant-task:${taskId}]`;
@@ -284,9 +458,13 @@ export class AiMemoryProvider {
         const summary = stringValue(handoff.summary) ?? stringValue(handoff.content) ?? "";
         return summary.includes(marker);
       });
-      return { matches, failed: !!payloadError(result) };
-    } catch {
-      return { matches: [], failed: true };
+      const failed = !!payloadError(result);
+      return { matches, failed, ...(failed ? { failedOperation: "memory_handoff_list" } : {}) };
+    } catch (error) {
+      return {
+        matches: [], failed: true,
+        failedOperation: error instanceof MemoryCallError ? error.failedOperation ?? "memory_handoff_list" : "memory_handoff_list",
+      };
     }
   }
 
@@ -392,6 +570,7 @@ export class AiMemoryProvider {
     let handoffStatus: MemoryOutcomeResult["handoffStatus"] = "not_required";
     let handoffIdValue: string | undefined;
     let errorCode: string | undefined;
+    let failedOperation: string | undefined;
     try {
       await this.withClient(input.sessionId, async (client, config) => {
         const markerRef = await this.ensureProjectMarker(client, config);
@@ -405,7 +584,7 @@ export class AiMemoryProvider {
         }
         const readError = payloadError(read);
         const isMissing = isNotFoundPayload(read);
-        if (readError && !isMissing) throw new MemoryCallError(readError, read);
+        if (readError && !isMissing) throw new MemoryCallError(readError, read, "memory_read_page");
         const pageId = stringValue(read.page_id) ?? stringValue(read.id);
         const nestedPage = toRecord(read.page);
         const currentBody = bounded(read.body ?? read.markdown ?? read.content ?? nestedPage?.body, MAX_OUTCOME_CHARS);
@@ -419,12 +598,17 @@ export class AiMemoryProvider {
           try {
             written = await this.call(client, config, "memory_write_page", writeArgs);
           } catch (error) {
-            if (isPreconditionFailure(error)) throw new MemoryCallError("concurrent_update");
+            if (isPreconditionFailure(error)) {
+              throw new MemoryCallError(
+                "concurrent_update", errorData(error),
+                error instanceof MemoryCallError ? error.failedOperation ?? "memory_write_page" : "memory_write_page",
+              );
+            }
             throw error;
           }
-          if (isPreconditionFailure(written)) throw new MemoryCallError("concurrent_update", written);
+          if (isPreconditionFailure(written)) throw new MemoryCallError("concurrent_update", written, "memory_write_page");
           const writeError = payloadError(written);
-          if (writeError) throw new MemoryCallError(writeError, written);
+          if (writeError) throw new MemoryCallError(writeError, written, "memory_write_page");
           const newPageId = stringValue(written.page_id) ?? stringValue(written.id);
           pageRef = newPageId ? `ai-memory:page:${newPageId}` : `ai-memory:path:${pagePath}`;
         }
@@ -439,6 +623,7 @@ export class AiMemoryProvider {
         if (listed.failed) {
           handoffStatus = "uncertain";
           errorCode = "handoff_list_failed";
+          failedOperation = listed.failedOperation;
           return;
         }
         if (listed.matches.length > 1) {
@@ -462,24 +647,28 @@ export class AiMemoryProvider {
             next_steps: safeNext ? [safeNext] : [],
           });
           const beginError = payloadError(begun);
-          if (beginError) throw new MemoryCallError(beginError, begun);
+          if (beginError) throw new MemoryCallError(beginError, begun, "memory_handoff_begin");
           handoffIdValue = handoffId(begun);
           handoffStatus = handoffIdValue ? "created" : "uncertain";
           if (handoffStatus === "uncertain") errorCode = "handoff_id_missing";
-        } catch {
+        } catch (error) {
           handoffStatus = "uncertain";
           errorCode = "handoff_delivery_uncertain";
+          failedOperation = error instanceof MemoryCallError ? error.failedOperation ?? "memory_handoff_begin" : "memory_handoff_begin";
         }
       });
       const incomplete = (handoffStatus as string) === "uncertain";
       return {
         status: incomplete ? "incomplete" : "synced", pageRef, handoffStatus,
         ...(handoffIdValue ? { handoffId: handoffIdValue } : {}), ...(errorCode ? { errorCode } : {}),
+        ...(failedOperation ? { failedOperation } : {}),
       };
     } catch (error) {
       return {
         status: "incomplete", pageRef, handoffStatus,
-        ...(handoffIdValue ? { handoffId: handoffIdValue } : {}), errorCode: isPreconditionFailure(error) ? "concurrent_update" : callErrorCode(error),
+        ...(handoffIdValue ? { handoffId: handoffIdValue } : {}),
+        errorCode: isPreconditionFailure(error) ? "concurrent_update" : callErrorCode(error),
+        ...(error instanceof MemoryCallError && error.failedOperation ? { failedOperation: error.failedOperation } : {}),
       };
     }
   }

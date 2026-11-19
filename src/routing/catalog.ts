@@ -26,8 +26,13 @@ export interface SkillCatalogEntry {
 
 const MATT_VERSION = "v1.3.2";
 const MATT_COMMIT = "d1478fcb140db0b93c0c8df17bcfd311844749d0";
-const MEMORY_VERSION = "v3.4.6";
-const MEMORY_COMMIT = "a11eff2514f24cb30c21917236ec187c0a359143";
+export const AI_MEMORY_UPSTREAM_PIN = {
+  name: "ai-memory",
+  version: "3.4.7",
+  commit: "fa0ec25dbe987b7574a7487ecf92f0873040c2f2",
+} as const;
+const MEMORY_VERSION = `v${AI_MEMORY_UPSTREAM_PIN.version}`;
+const MEMORY_COMMIT = AI_MEMORY_UPSTREAM_PIN.commit;
 const GRAPHIFY_VERSION = "v0.9.109";
 const GRAPHIFY_COMMIT = "d4a5b323ef8501518b82c58a05fe21b35ce24992";
 const TASTE_VERSION = "v2.5.1";
@@ -42,8 +47,7 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     role: "core-orchestrator",
     required: true,
     source: "https://github.com/mattpocock/skills/tree/d1478fcb140db0b93c0c8df17bcfd311844749d0",
-    upstream_skill_id: "ask-matt",
-    source_path: "skills/engineering/ask-matt/SKILL.md",
+    source_path: "src/routing/router.ts",
     version: MATT_VERSION,
     commit: MATT_COMMIT,
     license: "MIT",
@@ -56,7 +60,7 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     conflicts: ["Do not claim that the manual-only native ask-matt skill was invoked."],
     fallbacks: ["Return the bounded Tyrant policy and required host actions through MCP."],
     invocation: "every_project_task",
-    availability: "Tyrant policy is built in; native skill installation is not checked.",
+    availability: "Tyrant-owned Matt Pocock-inspired policy runs automatically; native ask-matt remains a separate manual skill.",
   },
   {
     id: "matt-ask-matt",
@@ -113,16 +117,16 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     version: MATT_VERSION,
     commit: MATT_COMMIT,
     license: "MIT",
-    description: "Test-first workflow for feature work and bug fixes.",
+    description: "Required test-first workflow for repository code changes; Tyrant loads it automatically when the route changes code.",
     triggers: ["feature implementation", "bug fix", "user requests test-first work"],
-    requirements: ["Host supports native skill loading.", "Project tests are available or can be created."],
-    host_loading_method: "host_native_skill",
+    requirements: ["SPEC-06 automatic host adapter is installed.", "Project tests are available or can be created; a required skill gap blocks code changes."],
+    host_loading_method: "project_pinned_skill_file",
     invocation_policy: "auto_when_task_matches",
     host_availability: "unknown",
     conflicts: [],
-    fallbacks: ["Use the returned test-first route guidance when native loading is unavailable."],
+    fallbacks: ["Block code changes if the required pinned skill body cannot be loaded."],
     invocation: "matching_engineering_tasks",
-    availability: "Host skill installation is not checked.",
+    availability: "Project setup stages the pinned skill; each routed body is hash-checked before injection.",
   },
   {
     id: "matt-diagnosing-bugs",
@@ -137,14 +141,14 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     license: "MIT",
     description: "Structured diagnosis for reported bugs, failures and performance regressions.",
     triggers: ["bug report", "test failure", "crash", "unexpected behavior", "slow operation"],
-    requirements: ["Host supports native skill loading.", "Keep captured output free of secrets."],
-    host_loading_method: "host_native_skill",
+    requirements: ["SPEC-06 automatic host adapter is installed.", "Keep captured output free of secrets."],
+    host_loading_method: "project_pinned_skill_file",
     invocation_policy: "auto_when_task_matches",
     host_availability: "unknown",
     conflicts: [],
     fallbacks: ["Use the Tyrant route reason and investigate the failing behavior before changing code."],
     invocation: "bug_and_failure_tasks",
-    availability: "Host skill installation is not checked.",
+    availability: "Project setup stages the pinned skill; each routed body is hash-checked before injection.",
   },
   {
     id: "matt-code-review",
@@ -159,14 +163,14 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     license: "MIT",
     description: "Two-axis review of standards and specification compliance.",
     triggers: ["user requests review", "post-implementation review"],
-    requirements: ["Host supports native skill loading.", "A fixed review range or current change set is available."],
-    host_loading_method: "host_native_skill",
+    requirements: ["SPEC-06 automatic host adapter is installed.", "A fixed review range or current change set is available."],
+    host_loading_method: "project_pinned_skill_file",
     invocation_policy: "auto_when_review_requested",
     host_availability: "unknown",
     conflicts: ["This skill's own agent-delegation behavior depends on host capabilities."],
     fallbacks: ["Use a bounded single-context review and identify that limitation."],
     invocation: "review_tasks",
-    availability: "Host skill installation is not checked.",
+    availability: "Project setup stages the pinned skill; each routed body is hash-checked before injection.",
   },
   {
     id: "matt-grill-with-docs",
@@ -195,7 +199,7 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     name: "AI Memory",
     role: "project-memory",
     required: true,
-    source: "https://github.com/akitaonrails/ai-memory/tree/a11eff2514f24cb30c21917236ec187c0a359143",
+    source: "https://github.com/akitaonrails/ai-memory/tree/fa0ec25dbe987b7574a7487ecf92f0873040c2f2",
     source_path: "docs/usage.md",
     version: MEMORY_VERSION,
     commit: MEMORY_COMMIT,
@@ -245,14 +249,14 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     license: "MIT",
     description: "Frontend design guidance for public websites and product screens.",
     triggers: ["frontend implementation", "frontend redesign", "website or app-screen polish"],
-    requirements: ["Node.js 22 or newer.", "Chrome, Edge or Chromium for the browser checks.", "Host supports native skill loading."],
-    host_loading_method: "host_native_skill",
+    requirements: ["SPEC-06 automatic host adapter is installed.", "Upstream helper instructions may require Node.js 22+ and Chrome, Edge or Chromium; verify the helper/runtime combination before running them."],
+    host_loading_method: "project_pinned_skill_file",
     invocation_policy: "required_when_frontend",
     host_availability: "unknown",
     conflicts: ["Direct user design choices and established project constraints take precedence."],
-    fallbacks: ["Report the missing host skill/runtime and use only a user-approved documented fallback."],
+    fallbacks: ["Block frontend changes if the complete pinned skill body cannot fit the host context."],
     invocation: "frontend_tasks",
-    availability: "Host skill installation is not checked.",
+    availability: "Full pinned skill tree/resources are staged by setup; the selected body is hash-checked before injection.",
   },
   {
     id: "security-audit",
@@ -267,13 +271,13 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     license: "MIT",
     description: "Defensive source-first guidance for security questions and explicitly requested codebase audits.",
     triggers: ["security question", "vulnerability investigation", "explicit audit or penetration-test request"],
-    requirements: ["Host supports native skill loading.", "Full audit mode requires an explicit user request or approved risk route.", "Source-only review can proceed without a sandbox; target-controlled execution requires a verified OS-enforced sandbox."],
-    host_loading_method: "host_native_skill",
+    requirements: ["SPEC-06 automatic host adapter is installed.", "Full audit mode requires an explicit user request or approved risk route.", "Source-only review can proceed without a sandbox; target-controlled execution requires a verified OS-enforced sandbox."],
+    host_loading_method: "project_pinned_skill_file",
     invocation_policy: "conditional_security_work",
     host_availability: "unknown",
     conflicts: ["Loading guidance does not authorize a full audit or artifact creation."],
-    fallbacks: ["Use source-only review without a sandbox; keep unrun phases blocked and execution-dependent findings needs_validation."],
+    fallbacks: ["Block the routed audit if the pinned skill body cannot be loaded; source-only review without a sandbox keeps unrun phases blocked and execution-dependent findings needs_validation."],
     invocation: "security_tasks",
-    availability: "Host skill installation is not checked; Tyrant has no OS-enforced sandbox or target-code executor.",
+    availability: "Project setup stages the pinned skill; each routed body is hash-checked. Tyrant has no OS-enforced sandbox or target-code executor.",
   },
 ];
