@@ -119,7 +119,7 @@ export async function recordAdapterExecution(
   outcome: ActivationOutcome = "context_injected",
   now = new Date(),
 ): Promise<void> {
-  const absoluteRoot = resolve(projectRoot);
+  const absoluteRoot = await realpath(resolve(projectRoot));
   const target = resolve(absoluteRoot, ".tyrant", "adapters", "activation.json");
   await ensureSafeParents(absoluteRoot, target);
   try {

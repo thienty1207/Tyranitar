@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,7 +104,7 @@ test("setup creates a new vault path when it does not already exist", async () =
   expect(await runTyrantCli(["setup", selected, "--name", "Any label"], deps)).toBe(0);
   expect((await lstat(selected)).isDirectory()).toBe(true);
   const registry = await loadProfileRegistry({ stateDirectory: f.stateDirectory });
-  expect(registry.profiles[0]?.vaultPath).toBe(selected);
+  expect(registry.profiles[0]?.vaultPath).toBe(realpathSync.native(selected));
 });
 
 test("init fails without a default profile and does not install adapters", async () => {
@@ -126,7 +127,7 @@ test("init preserves a project's bound profile after the user changes the defaul
   expect(calls.find((call) => call.kind === "memory")?.value).toMatchObject({ id: a.id });
   expect(JSON.parse(output.join("")).binding.profile_id).toBe(a.id);
   const installed = await loadInstallState({ stateDirectory: f.stateDirectory });
-  expect(installed.projects).toEqual([{ project_root: f.project, hosts: ["codex", "claude-code", "opencode", "dsh", "claude-desktop"] }]);
+  expect(installed.projects).toEqual([{ project_root: realpathSync.native(f.project), hosts: ["codex", "claude-code", "opencode", "dsh", "claude-desktop"] }]);
 });
 
 test("explicit init profile is the only rebind path and delegates adapter installation", async () => {

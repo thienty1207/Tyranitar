@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -530,7 +531,7 @@ test("DSH native skill registry runs first but cannot replace the integrity-pinn
     const request = { host_id: "dsh", cwd: workspace, skill_id: "matt-pocock-main-flow", source_skill_id: "ask-matt" };
     const loaded = await loader(request);
     expect(loaded.content).not.toContain("\r");
-    expect(loaded).toMatchObject({ status: "loaded", method: "host_skill_file", source_ref: askPath, content: bodyOf(askBody) });
+    expect(loaded).toMatchObject({ status: "loaded", method: "host_skill_file", source_ref: realpathSync.native(askPath), content: bodyOf(askBody) });
     expect(registryCalls).toBe(1);
     const native = dshAdapterApi.createDshSkillLoader({ id: "native-agent" }, new AbortController().signal, async () => ({
       content: askBody,

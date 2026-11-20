@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -210,7 +211,7 @@ test("default update refreshes registered projects while preserving their vault 
     refreshDsh: async () => ({ status: "ready", profile: "workstation" }),
   });
 
-  expect(result.projects).toEqual([{ project_root: projectRoot, status: "updated" }]);
+  expect(result.projects).toEqual([{ project_root: realpathSync.native(projectRoot), status: "updated" }]);
   expect(await readFile(join(projectRoot, ".tyrant", "adapters", "command-hook.js"), "utf8")).toBe("// Tyrant 0.1.1 hook\n");
   const codexConfig = Bun.TOML.parse(await readFile(join(projectRoot, ".codex", "config.toml"), "utf8")) as { mcp_servers: { tyrant: { args: string[] } } };
   expect(codexConfig.mcp_servers.tyrant.args).toEqual(["run", join(nextEngineRoot, "src", "index.ts")]);

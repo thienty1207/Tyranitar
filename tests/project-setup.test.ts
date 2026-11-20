@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -152,7 +153,7 @@ test("setup preserves unrelated hook settings and repeated install is idempotent
     const openCodeConfig = Bun.JSONC.parse(await readFile(join(f.projectRoot, ".opencode", "opencode.jsonc"), "utf8")) as Record<string, any>;
     expect(codex.model).toBe("keep-model");
     expect(codex.mcp_servers.github).toEqual({ command: "echo", args: ["keep"] });
-    expect(codex.mcp_servers.tyrant.env.TYRANT_PROJECT_ROOT).toBe(f.projectRoot);
+    expect(codex.mcp_servers.tyrant.env.TYRANT_PROJECT_ROOT).toBe(realpathSync.native(f.projectRoot));
     expect(codex.hooks.PreToolUse).toHaveLength(1);
     expect(codex.hooks.UserPromptSubmit).toHaveLength(1);
     expect(codex.hooks.UserPromptSubmit[0].hooks[0].additionalContextLimit).toBe(0);

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, posix, resolve, win32 } from "node:path";
+import { canonicalPathIdentity } from "../state/path-identity";
 
 export type VaultProfile = {
   id: string;
@@ -160,9 +161,7 @@ function normalizeName(name: string): string {
 }
 
 function profilePathKey(path: string, platform: NodeJS.Platform): string {
-  const paths = platformPath(platform);
-  const normalized = paths.normalize(paths.resolve(path));
-  return platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
+  return canonicalPathIdentity(path, platform);
 }
 
 async function canonicalDirectory(path: string, notFoundCode: string): Promise<string> {
@@ -373,16 +372,24 @@ async function projectBindingPath(projectRoot: string): Promise<{ root: string; 
 }
 
 function projectRootKey(projectRoot: string, platform: NodeJS.Platform): string {
-  return platform === "win32" ? projectRoot.toLocaleLowerCase("en-US") : projectRoot;
+  return canonicalPathIdentity(projectRoot, platform);
 }
 
-function stableProjectScope(projectRoot: string, profileId: string, platform: NodeJS.Platform): { projectId: string; scope: ProjectScope } {
-  const normalizedRoot = projectRootKey(projectRoot, platform);
+function scopeFromRootKey(normalizedRoot: string, profileId: string): { projectId: string; scope: ProjectScope } {
   const projectId = createHash("sha256").update(normalizedRoot).digest("hex");
   return {
     projectId,
     scope: { workspace: `tyrant-profile-${profileId}`, project: `project-${projectId}` },
   };
+}
+
+function stableProjectScope(projectRoot: string, profileId: string, platform: NodeJS.Platform): { projectId: string; scope: ProjectScope } {
+  return scopeFromRootKey(projectRootKey(projectRoot, platform), profileId);
+}
+
+function legacyProjectScope(projectRoot: string, profileId: string, platform: NodeJS.Platform): { projectId: string; scope: ProjectScope } {
+  const legacyRoot = platform === "win32" ? projectRoot.toLocaleLowerCase("en-US") : projectRoot;
+  return scopeFromRootKey(legacyRoot, profileId);
 }
 
 function validScopePart(value: unknown): value is string {
@@ -425,11 +432,15 @@ function scopeFingerprint(projectId: string, profileId: string, scope: ProjectSc
 function validateBindingIdentity(binding: ProjectBinding, root: string, profileId: string, platform: NodeJS.Platform): void {
   if (projectRootKey(binding.projectRoot, platform) !== projectRootKey(root, platform)) throw new Error("project_binding_root_mismatch");
   const identity = stableProjectScope(root, profileId, platform);
-  if (binding.projectId !== identity.projectId) throw new Error("project_binding_identity_mismatch");
+  const legacyIdentity = legacyProjectScope(binding.projectRoot, profileId, platform);
+  const boundIdentity = binding.projectId === identity.projectId
+    ? identity
+    : binding.projectId === legacyIdentity.projectId ? legacyIdentity : undefined;
+  if (!boundIdentity) throw new Error("project_binding_identity_mismatch");
   const source = binding.scopeSource ?? "tyrant";
   const configuredScope = readConfiguredProjectScope(root);
   if (source === "tyrant") {
-    if (!sameScope(binding.scope, identity.scope)) throw new Error("project_binding_scope_mismatch");
+    if (!sameScope(binding.scope, boundIdentity.scope)) throw new Error("project_binding_scope_mismatch");
     if (configuredScope && !sameScope(configuredScope, binding.scope)) throw new Error("project_scope_conflicts_with_binding");
   } else {
     if (!configuredScope) throw new Error("project_scope_config_missing");

@@ -146,7 +146,7 @@ test("moves aside only the stale Tyrant junction before DSH replaces its package
   expect(result.status).toBe("installed");
   expect(await realpath(linkPath)).toBe(await realpath(f.engine));
   expect(await readdir(join(f.profileRoot, "node_modules"))).toEqual(["tyrant-engine"]);
-  expect(await realpath(oldEngine)).toBe(oldEngine);
+  expect((await lstat(oldEngine)).isDirectory()).toBe(true);
 });
 
 test("restores the previous DSH plugin junction when package replacement fails", async () => {

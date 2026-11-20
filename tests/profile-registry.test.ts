@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -205,9 +206,28 @@ test("copied project bindings fail closed until an explicit profile rebind", asy
     await expect(profilesApi.resolveProjectProfile(copied, { stateDirectory: f.userState })).rejects.toThrow("project_binding_root_mismatch");
     await expect(profilesApi.bindProjectProfile({ projectRoot: copied, profile })).rejects.toThrow("project_binding_root_mismatch");
     const rebound = await profilesApi.bindProjectProfile({ projectRoot: copied, profile, explicitRebind: true });
-    expect(rebound.projectRoot).toBe(copied);
+    expect(rebound.projectRoot).toBe(realpathSync.native(copied));
     expect(rebound.projectId).not.toBe(original.projectId);
     expect((await profilesApi.resolveProjectProfile(copied, { stateDirectory: f.userState }))?.binding.projectId).toBe(rebound.projectId);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("project bindings resolve when the host switches between equivalent Windows path forms", async () => {
+  expect(profilesApi?.bindProjectProfile).toBeDefined();
+  expect(profilesApi?.resolveProjectProfileSync).toBeDefined();
+  if (!profilesApi) return;
+  const f = await fixture();
+  const project = join(f.root, "path-alias-project");
+  await mkdir(project);
+  try {
+    const profile = await profilesApi.activateVaultProfile({
+      vaultPath: f.vaultA, name: "Path alias", endpoint: "http://127.0.0.1:49375/mcp", configPath: join(f.vaultA, "config.toml"),
+    }, { stateDirectory: f.userState });
+    const binding = await profilesApi.bindProjectProfile({ projectRoot: project, profile });
+    const hostResolvedPath = realpathSync.native(project);
+    expect(profilesApi.resolveProjectProfileSync(hostResolvedPath, { stateDirectory: f.userState })?.binding.projectId).toBe(binding.projectId);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

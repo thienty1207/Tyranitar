@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,7 +60,7 @@ test("refreshes a local code-only map, runs a bounded query, and returns stable 
   expect(invocations[0].args).not.toContain(".opencode");
   expect(invocations[0].args).toContain("--out");
   expect(invocations[0].env.GRAPHIFY_BACKEND).toBe("none");
-  expect(invocations[0].env.GRAPHIFY_OUT).toBe(join(projectRoot, "graphify-out"));
+  expect(invocations[0].env.GRAPHIFY_OUT).toBe(join(realpathSync.native(projectRoot), "graphify-out"));
   expect(invocations[0].env.GRAPHIFY_QUERY_LOG_DISABLE).toBe("1");
   expect(invocations[0].env.GEMINI_API_KEY).toBeUndefined();
   expect(invocations[0].env.OPENAI_API_KEY).toBeUndefined();
@@ -68,7 +69,7 @@ test("refreshes a local code-only map, runs a bounded query, and returns stable 
   expect(invocations[1].args).toContain("--depth");
   expect(invocations[1].args).toContain("--graph");
   expect(invocations[1].args[1].length).toBeLessThanOrEqual(600);
-  expect(invocations[0].cwd).toBe(projectRoot);
+  expect(invocations[0].cwd).toBe(realpathSync.native(projectRoot));
 });
 
 test("host-specific Graphify deadlines never exceed the configured provider timeout", async () => {

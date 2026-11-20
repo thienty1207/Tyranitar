@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ProjectAdapterHost } from "../adapters/project-setup";
+import { canonicalPathIdentity } from "../state/path-identity";
 import { getTyrantUserDirectory } from "./profiles";
 
 export type RegisteredProject = { project_root: string; hosts: ProjectAdapterHost[] };
@@ -22,8 +23,7 @@ function validProfile(value: unknown): value is string {
 }
 
 function projectKey(value: string): string {
-  const normalized = resolve(value);
-  return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
+  return canonicalPathIdentity(value);
 }
 
 function parseState(value: unknown): TyrantInstallState {

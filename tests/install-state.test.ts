@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +25,7 @@ test("stores the DSH profile and registers canonical projects for safe update re
   const state = await stateApi.loadInstallState({ stateDirectory });
   expect(state.dsh_profile).toBe("workstation");
   expect(state.projects).toHaveLength(1);
-  expect(state.projects[0]?.project_root).toBe(project);
+  expect(state.projects[0]?.project_root).toBe(realpathSync.native(project));
   expect(state.projects[0]?.hosts).toEqual(["codex", "claude-code"]);
 });
 
