@@ -504,8 +504,8 @@ test("DSH native skill registry runs first but cannot replace the integrity-pinn
   const workspace = join(sandbox, "project");
   const askPath = join(workspace, ".tyrant", "skills", "ask-matt", "SKILL.md");
   const tastePath = join(workspace, ".tyrant", "skills", "design-taste-frontend", "SKILL.md");
-  const askBody = await readFile(join(import.meta.dir, "..", "vendor", "skills", "ask-matt", "SKILL.md"), "utf8");
-  const tasteBody = await readFile(join(import.meta.dir, "..", "vendor", "skills", "design-taste-frontend", "SKILL.md"), "utf8");
+  const askBody = (await readFile(join(import.meta.dir, "..", "vendor", "skills", "ask-matt", "SKILL.md"), "utf8")).replace(/\r?\n/g, "\r\n");
+  const tasteBody = (await readFile(join(import.meta.dir, "..", "vendor", "skills", "design-taste-frontend", "SKILL.md"), "utf8")).replace(/\r?\n/g, "\r\n");
   const bodyOf = (content: string) => {
     const normalized = content.replaceAll("\r\n", "\n").trim();
     const end = normalized.startsWith("---\n") ? normalized.indexOf("\n---", 4) : -1;
@@ -529,6 +529,7 @@ test("DSH native skill registry runs first but cannot replace the integrity-pinn
     });
     const request = { host_id: "dsh", cwd: workspace, skill_id: "matt-pocock-main-flow", source_skill_id: "ask-matt" };
     const loaded = await loader(request);
+    expect(loaded.content).not.toContain("\r");
     expect(loaded).toMatchObject({ status: "loaded", method: "host_skill_file", source_ref: askPath, content: bodyOf(askBody) });
     expect(registryCalls).toBe(1);
     const native = dshAdapterApi.createDshSkillLoader({ id: "native-agent" }, new AbortController().signal, async () => ({

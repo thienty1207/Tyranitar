@@ -86,7 +86,7 @@ export function createTyrantServer(options: {
 } = {}): McpServer {
   const withStore = <T>(callback: Parameters<typeof withTyrantStore<T>>[0]): T =>
     withTyrantStore(callback, { projectRoot: options.projectRoot, stateDirectory: options.stateDirectory });
-  const aiMemory = options.aiMemory ?? new AiMemoryProvider(undefined, options.projectRoot);
+  const aiMemory = options.aiMemory ?? new AiMemoryProvider(undefined, options.projectRoot, options.stateDirectory);
   const graphify = options.graphify ?? new GraphifyProvider({ projectRoot: options.projectRoot });
   const server = new McpServer(
     { name: "tyrant", version: "0.1.0" },

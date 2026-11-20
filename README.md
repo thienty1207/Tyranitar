@@ -1,5 +1,35 @@
 # Tyrant Engine
 
+## Install and set up
+
+Windows source install (Bun 1.4+ and Git required):
+
+```powershell
+git clone --depth 1 https://github.com/thienty1207/Tyranitar.git Tyranitar
+Set-Location .\Tyranitar
+bun install --frozen-lockfile
+bun install --global .
+```
+
+This installs the current source checkout and its `tyrant` command. If Windows cannot find `tyrant`, add the path from `bun pm bin -g` to your user PATH and open a new terminal. Checksum-verified Tyrant release packages are not published yet.
+
+Create or select any AI-Memory vault profile. The label is yours; Tyrant does not assign project types:
+
+```powershell
+tyrant setup "D:\path\to\your\vault" --name "your label"
+```
+
+Or, from inside an existing vault folder, run `tyrant setup --name "your label"`. Setup privately downloads AI-Memory `3.4.7` when no matching executable is available, verifies the official Windows archive checksum, extracts only `ai-memory.exe` into Tyrant's user runtime, and initializes a fresh vault using its configured token file. It then installs or checks Graphify `0.9.109`, selects that vault as the default for future projects, and ensures the Tyrant plugin is installed in the DSH user profile when the `dsh` CLI is available. That DSH plugin is shared across projects; it reads the current agent's project root and that project's saved vault binding for every task. Tyrant keeps its AI-Memory, Graphify, uv, and Python runtimes in its own user state; you do not need to install those runtimes manually. The pinned AI-Memory source and checksum are published on the [v3.4.7 release](https://github.com/akitaonrails/ai-memory/releases/tag/v3.4.7).
+
+Initialize a project from its root:
+
+```powershell
+Set-Location "D:\path\to\project"
+tyrant init
+```
+
+Use another saved vault deliberately with `tyrant init --vault "your label"`. A project already initialized stays bound to its saved profile when the default changes; explicit `--vault` is the rebind path. Running `tyrant setup` for another vault changes the default for projects initialized afterward. `tyrant setup` and `tyrant init` automatically manage one shared Tyrant plugin in the selected DSH user profile. They install or update it only when it is missing, points to another Tyrant checkout, or its installed integration bundle is stale; switching projects or vaults does not reinstall it. For a project with a saved vault binding, Tyrant ignores global AI-Memory environment overrides from DSH and uses that project's profile; unbound projects can still use explicit environment configuration. If DSH was open during its first install or an update, restart DSH once so it reloads the plugin. Run `tyrant status` to inspect the current binding without displaying credentials, or `tyrant doctor` to check provider connectivity.
+
 Tyrant is a local MCP orchestrator for coding agents. It applies its Matt Pocock-inspired workflow policy, routes work to host skills, and keeps durable task state. It does not call a model.
 
 Task state is stored in plaintext SQLite. Common credential patterns are redacted before persistence, but detection is best-effort and incomplete: do not put passwords, API keys, tokens, or other secrets in task, checkpoint, event, or evidence text. The MVP caps the database at 64 MiB, limits each project to 250 tasks, and stops accepting new writes after 1,000 stored mutations.
@@ -7,7 +37,7 @@ Task state is stored in plaintext SQLite. Common credential patterns are redacte
 ## Requirements
 
 - Bun 1.4 or newer
-- Install dependencies with bun install
+- Install dependencies with `bun install`
 
 ## Run
 

@@ -135,11 +135,12 @@ function skillRoots(hostId: string, cwd: string): string[] {
 }
 
 function stripFrontmatter(content: string): string {
-  if (!content.startsWith("---\n") && !content.startsWith("---\r\n")) return content.trim();
-  const closing = content.indexOf("\n---", 4);
-  if (closing < 0) return content.trim();
-  const end = content.indexOf("\n", closing + 1);
-  return (end < 0 ? "" : content.slice(end + 1)).trim();
+  const normalized = content.replaceAll("\r\n", "\n");
+  if (!normalized.startsWith("---\n")) return normalized.trim();
+  const closing = normalized.indexOf("\n---", 4);
+  if (closing < 0) return normalized.trim();
+  const end = normalized.indexOf("\n", closing + 1);
+  return (end < 0 ? "" : normalized.slice(end + 1)).trim();
 }
 
 async function fileExists(path: string): Promise<boolean> {

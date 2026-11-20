@@ -1,7 +1,9 @@
-import { lstatSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { redactSensitiveText } from "../state/redaction";
+import { configuredTokenPath, ensureAiMemoryProfile, inspectAiMemoryEndpointOwner, aiMemoryProfileIdentityMarker, readAiMemoryProfileConfig, readTokenFileSafe } from "../setup/ai-memory-runtime";
+import { readConfiguredProjectScope, resolveProjectProfileSync, type ProfileStoreOptions, type VaultProfile } from "../setup/profiles";
 import { AI_MEMORY_UPSTREAM_TOOLS } from "./ai-memory-tool-contract";
 
 const DEFAULT_URL = "http://127.0.0.1:49374/mcp";
@@ -11,8 +13,6 @@ const MAX_OUTCOME_CHARS = 4_000;
 const MAX_PROXY_RESULT_CHARS = 100_000;
 const TIMEOUT_MS = 8_000;
 const PROJECT_MARKER_PATH = "tyrant/project.md";
-const DEFAULT_DATA_DIR = "D:\\AI-MEMORY";
-const MAX_AUTH_TOKEN_FILE_BYTES = 16_384;
 
 type Scope = { workspace: string; project: string };
 export type AiMemoryConfig = {
@@ -21,6 +21,12 @@ export type AiMemoryConfig = {
   scope: Scope | null;
   timeoutMs: number;
   projectRoot: string;
+  profile?: VaultProfile;
+};
+
+export type AiMemoryProviderDependencies = {
+  inspectEndpointOwner?: typeof inspectAiMemoryEndpointOwner;
+  ensureProfile?: typeof ensureAiMemoryProfile;
 };
 
 type MemoryContextInput = { taskId?: string; summary: string; resume: boolean; sessionId?: string };
@@ -76,70 +82,59 @@ function normalizeUrl(value: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
-function readProjectScope(projectRoot: string): Scope | null {
-  try {
-    const raw = readFileSync(resolve(projectRoot, ".ai-memory.toml"), "utf8");
-    const parsed = Bun.TOML.parse(raw) as Record<string, unknown>;
-    const workspace = stringValue(parsed.workspace);
-    const project = stringValue(parsed.project);
-    return workspace && project ? { workspace, project } : null;
-  } catch {
-    return null;
-  }
-}
-
-function readAuthTokenFile(path: string): string {
-  let info;
-  try {
-    info = lstatSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("token_file_missing");
-    throw new Error("token_file_unreadable");
-  }
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error("token_file_not_regular");
-  if (info.size > MAX_AUTH_TOKEN_FILE_BYTES) throw new Error("token_file_too_large");
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(path);
-  } catch {
-    throw new Error("token_file_unreadable");
-  }
-  if (bytes.length > MAX_AUTH_TOKEN_FILE_BYTES) throw new Error("token_file_too_large");
-  const token = bytes.toString("utf8").trim();
-  if (!token) throw new Error("token_file_empty");
-  if (/[\u0000-\u001f\u007f]/.test(token)) throw new Error("token_file_invalid");
-  return token;
-}
-
-export function getAiMemoryConfig(projectRoot = process.env.TYRANT_PROJECT_ROOT || process.cwd(), env: Record<string, string | undefined> = process.env): AiMemoryConfig {
+export function getAiMemoryConfig(
+  projectRoot = process.env.TYRANT_PROJECT_ROOT || process.cwd(),
+  env: Record<string, string | undefined> = process.env,
+  configuredStateDirectory?: string,
+): AiMemoryConfig {
   const resolvedRoot = resolve(projectRoot);
-  const url = normalizeUrl(env.TYRANT_AI_MEMORY_URL?.trim() || env.AI_MEMORY_SERVER_URL?.trim() || DEFAULT_URL);
+  const profileStoreOptions: ProfileStoreOptions = {
+    stateDirectory: configuredStateDirectory || env.TYRANT_STATE_DIR,
+    env,
+  };
+  const binding = resolveProjectProfileSync(resolvedRoot, profileStoreOptions);
+  const profile = binding?.profile;
   const explicitToken = env.TYRANT_AI_MEMORY_AUTH_TOKEN?.trim() || env.AI_MEMORY_AUTH_TOKEN?.trim();
   const explicitTokenFile = env.TYRANT_AI_MEMORY_TOKEN_FILE?.trim() || env.AI_MEMORY_TOKEN_FILE?.trim();
   const configuredDataDir = env.AI_MEMORY_DATA_DIR?.trim();
+  let url: string;
   let authToken = explicitToken || undefined;
-  if (!authToken) {
-    const tokenPath = explicitTokenFile ? resolve(explicitTokenFile) : join(resolve(configuredDataDir || DEFAULT_DATA_DIR), "auth-token");
-    try {
-      authToken = readAuthTokenFile(tokenPath);
-    } catch (error) {
-      const isOptionalDefaultMissing = !explicitTokenFile && !configuredDataDir
-        && error instanceof Error && error.message === "token_file_missing";
-      if (!isOptionalDefaultMissing) throw error;
-    }
-  }
-  const envWorkspace = env.TYRANT_AI_MEMORY_WORKSPACE?.trim();
-  const envProject = env.TYRANT_AI_MEMORY_PROJECT?.trim();
   let scope: Scope | null;
-  if (envWorkspace || envProject) {
-    if (!envWorkspace || !envProject) throw new Error("scope_incomplete");
-    scope = { workspace: envWorkspace, project: envProject };
+
+  if (profile && binding) {
+    const profileConfigUrl = normalizeUrl(profile.endpoint);
+    const configuredUrl = env.TYRANT_AI_MEMORY_URL?.trim() || env.AI_MEMORY_SERVER_URL?.trim();
+    if (configuredUrl && normalizeUrl(configuredUrl) !== profileConfigUrl) throw new Error("profile_endpoint_override_blocked");
+    if (explicitToken || explicitTokenFile) throw new Error("profile_auth_override_blocked");
+    const profileConfig = configuredTokenPath(profile.configPath, profile.vaultPath);
+    authToken = readTokenFileSafe(profileConfig);
+    url = profileConfigUrl;
+    scope = binding.binding.scope;
+    const envWorkspace = env.TYRANT_AI_MEMORY_WORKSPACE?.trim();
+    const envProject = env.TYRANT_AI_MEMORY_PROJECT?.trim();
+    if ((envWorkspace || envProject)
+      && (envWorkspace !== scope.workspace || envProject !== scope.project)) throw new Error("profile_scope_override_blocked");
   } else {
-    scope = readProjectScope(resolvedRoot);
+    url = normalizeUrl(env.TYRANT_AI_MEMORY_URL?.trim() || env.AI_MEMORY_SERVER_URL?.trim() || DEFAULT_URL);
+    if (!authToken) {
+      if (explicitTokenFile) authToken = readTokenFileSafe(resolve(explicitTokenFile));
+      else if (configuredDataDir) {
+        const configPath = resolve(env.AI_MEMORY_CONFIG_PATH?.trim() || join(resolve(configuredDataDir), "config.toml"));
+        authToken = readTokenFileSafe(configuredTokenPath(configPath, resolve(configuredDataDir)));
+      }
+    }
+    const envWorkspace = env.TYRANT_AI_MEMORY_WORKSPACE?.trim();
+    const envProject = env.TYRANT_AI_MEMORY_PROJECT?.trim();
+    if (envWorkspace || envProject) {
+      if (!envWorkspace || !envProject) throw new Error("scope_incomplete");
+      scope = { workspace: envWorkspace, project: envProject };
+    } else {
+      scope = readConfiguredProjectScope(resolvedRoot) ?? null;
+    }
   }
   const timeoutValue = Number(env.TYRANT_AI_MEMORY_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue >= 500 && timeoutValue <= 30_000 ? timeoutValue : TIMEOUT_MS;
-  return { url, authToken, scope, timeoutMs, projectRoot: resolvedRoot };
+  return { url, authToken, scope, timeoutMs, projectRoot: resolvedRoot, ...(profile ? { profile } : {}) };
 }
 
 function toRecord(value: unknown): ToolPayload | undefined {
@@ -169,6 +164,20 @@ const KNOWN_ERROR_CODES = new Set([
   "page_not_found", "not_found", "missing_page", "precondition_failed", "scope_missing", "scope_incomplete",
   "unauthorized", "forbidden", "tool_failed", "provider_error", "invalid_config", "invalid_url", "insecure_remote_url",
   "token_file_missing", "token_file_not_regular", "token_file_too_large", "token_file_empty", "token_file_invalid", "token_file_unreadable",
+  "profile_not_found", "profile_endpoint_override_blocked", "profile_auth_override_blocked", "profile_scope_override_blocked",
+  "profile_endpoint_mismatch", "profile_endpoint_invalid", "profile_endpoint_must_be_loopback", "profile_endpoint_port_invalid", "profile_id_invalid", "profile_id_conflict", "profile_name_invalid",
+  "profile_file_not_regular", "profile_registry_invalid", "project_binding_invalid", "project_binding_root_mismatch",
+  "ai_memory_cli_missing", "ai_memory_config_missing", "ai_memory_config_invalid", "ai_memory_server_unavailable",
+  "ai_memory_server_start_failed", "ai_memory_version_mismatch", "ai_memory_server_version_mismatch",
+  "ai_memory_identity_mismatch", "ai_memory_identity_unverified", "ai_memory_auth_failed", "ai_memory_provider_unavailable",
+  "ai_memory_server_identity_mismatch", "ai_memory_server_identity_unavailable", "ai_memory_server_unavailable",
+  "ai_memory_endpoint_owner_mismatch", "ai_memory_endpoint_owner_unverified", "ai_memory_endpoint_unreachable", "ai_memory_endpoint_unavailable",
+  "ai_memory_version_check_failed", "ai_memory_version_unavailable", "ai_memory_init_failed",
+  "ai_memory_managed_state_conflict", "ai_memory_provision_platform_unsupported", "ai_memory_download_failed",
+  "ai_memory_archive_too_large", "ai_memory_checksum_mismatch", "ai_memory_extract_failed", "ai_memory_binary_invalid",
+  "ai_memory_install_failed", "ai_memory_command_failed", "ai_memory_config_missing", "ai_memory_config_invalid",
+  "ai_memory_identity_read_failed", "ai_memory_identity_write_failed",
+  "auth_token_path_missing",
 ]);
 
 function normalizeErrorCode(value: unknown): string | undefined {
@@ -366,25 +375,85 @@ function extractHandoffText(payload: ToolPayload): string {
 }
 
 export class AiMemoryProvider {
-  private readonly config: AiMemoryConfig | null;
-  private readonly configError?: string;
+  private config: AiMemoryConfig | null = null;
+  private configError?: string;
+  private readonly explicitConfig?: AiMemoryConfig;
+  private readonly projectRoot: string;
+  private readonly stateDirectory?: string;
+  private readonly dependencies: AiMemoryProviderDependencies;
 
-  constructor(config?: AiMemoryConfig, projectRoot?: string) {
+  constructor(config?: AiMemoryConfig, projectRoot?: string, stateDirectory?: string, dependencies: AiMemoryProviderDependencies = {}) {
+    this.explicitConfig = config;
+    this.projectRoot = resolve(config?.projectRoot ?? projectRoot ?? process.env.TYRANT_PROJECT_ROOT ?? process.cwd());
+    this.stateDirectory = stateDirectory;
+    this.dependencies = dependencies;
+    this.refreshConfig();
+  }
+
+  private refreshConfig(): void {
     try {
-      this.config = config ?? getAiMemoryConfig(projectRoot);
+      this.config = this.explicitConfig ?? getAiMemoryConfig(this.projectRoot, process.env, this.stateDirectory);
+      this.configError = undefined;
     } catch (error) {
       this.config = null;
-      const safeCode = error instanceof Error && /^token_file_(missing|not_regular|too_large|empty|invalid|unreadable)$/.test(error.message)
+      const safeCode = error instanceof Error && /^(token_file_|profile_|ai_memory_|auth_token_path_|scope_)/.test(error.message)
         ? error.message
         : "invalid_config";
       this.configError = safeCode;
     }
   }
 
+  private async verifyProfileOnClient(client: Client, config: AiMemoryConfig): Promise<void> {
+    const profile = config.profile;
+    if (!profile) return;
+    const ownerConfig = readAiMemoryProfileConfig(profile);
+    const owner = await (this.dependencies.inspectEndpointOwner ?? inspectAiMemoryEndpointOwner)(ownerConfig);
+    if (owner !== "owned") throw new MemoryCallError(owner === "foreign" ? "ai_memory_endpoint_owner_mismatch" : "ai_memory_endpoint_unavailable");
+    const marker = aiMemoryProfileIdentityMarker(profile);
+    const result = await client.callTool({
+      name: "memory_read_page",
+      arguments: { path: marker.path, scope: "global", max_chars: 2_000 },
+    }, { timeout: config.timeoutMs });
+    const payload = decodeResult(result);
+    if (result.isError || stringValue(payload.body) !== marker.body) throw new MemoryCallError("ai_memory_identity_mismatch", undefined, "memory_read_page");
+  }
+
+  private async ensureProfileRuntime(profile: VaultProfile): Promise<void> {
+    try {
+      await (this.dependencies.ensureProfile ?? ensureAiMemoryProfile)(profile, {
+        stateDirectory: this.stateDirectory,
+        initialize: true,
+      });
+    } catch (error) {
+      const rawCode = error instanceof Error ? error.message : "";
+      const safeCode = /^(?:ai_memory|token_file|auth_token_path|profile)_[a-z0-9_]{1,80}$/.test(rawCode)
+        ? normalizeErrorCode(rawCode) ?? "ai_memory_server_unavailable"
+        : "ai_memory_server_unavailable";
+      throw new MemoryCallError(safeCode === "tool_failed" ? "ai_memory_server_unavailable" : safeCode);
+    }
+  }
+
+  private async recoverMissingBoundProfileConfig(): Promise<boolean> {
+    if (this.config || !this.configError || !/^(?:ai_memory_config_missing|token_file_(?:missing|unreadable))$/.test(this.configError)) return false;
+    const binding = resolveProjectProfileSync(this.projectRoot, { stateDirectory: this.stateDirectory });
+    if (!binding) return false;
+    await this.ensureProfileRuntime(binding.profile);
+    this.refreshConfig();
+    return Boolean(this.config);
+  }
+
   private async withClient<T>(sessionId: string | undefined, action: (client: Client, config: AiMemoryConfig) => Promise<T>, requireScope = true): Promise<T> {
-    const config = this.config;
+    this.refreshConfig();
+    if (!this.config) await this.recoverMissingBoundProfileConfig();
+    let config = this.config;
     if (!config) throw new MemoryCallError(this.configError ?? "invalid_config");
     if (requireScope && !config.scope) throw new MemoryCallError("scope_missing");
+    if (config.profile) {
+      await this.ensureProfileRuntime(config.profile);
+      const ownerConfig = readAiMemoryProfileConfig(config.profile);
+      const owner = await (this.dependencies.inspectEndpointOwner ?? inspectAiMemoryEndpointOwner)(ownerConfig);
+      if (owner !== "owned") throw new MemoryCallError(owner === "foreign" ? "ai_memory_endpoint_owner_mismatch" : "ai_memory_endpoint_unavailable");
+    }
     const headers: Record<string, string> = {};
     if (config.authToken) headers.Authorization = `Bearer ${config.authToken}`;
     if (sessionId) headers["X-Memory-Actor-Session-Id"] = bounded(sessionId, 256);
@@ -394,6 +463,7 @@ export class AiMemoryProvider {
     const client = new Client({ name: "tyrant", version: "0.1.0" });
     try {
       await client.connect(transport, { timeout: config.timeoutMs });
+      await this.verifyProfileOnClient(client, config);
       return await action(client, config);
     } finally {
       await client.close().catch(() => undefined);
@@ -415,13 +485,13 @@ export class AiMemoryProvider {
   }
 
   async invokeTool(name: string, rawArgs: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> {
+    this.refreshConfig();
     const tool = AI_MEMORY_UPSTREAM_TOOLS.find((item) => item.name === name);
     if (!tool) return safeProxyError({ error: "tool_failed" }, "unknown_tool");
-    if (!this.config) return safeProxyError({ error: this.configError ?? "invalid_config" }, name);
     try {
-      const args = applyDefaultProjectScope(tool.inputSchema, rawArgs, this.config.scope);
-      const actorSessionId = sessionId ?? stringValue(args.session_id);
+      const actorSessionId = sessionId ?? stringValue(rawArgs.session_id);
       return await this.withClient(actorSessionId, async (client, config) => {
+        const args = applyDefaultProjectScope(tool.inputSchema, rawArgs, config.scope);
         const result = await client.callTool({ name, arguments: args }, { timeout: config.timeoutMs });
         const payload = decodeResult(result);
         if (result.isError) return safeProxyError(payload, name);
@@ -469,6 +539,17 @@ export class AiMemoryProvider {
   }
 
   async loadContext(input: MemoryContextInput): Promise<MemoryContextResult> {
+    this.refreshConfig();
+    if (!this.config) {
+      try {
+        await this.recoverMissingBoundProfileConfig();
+      } catch (error) {
+        return {
+          status: "unavailable", context: "ai-memory context is unavailable because the bound vault could not be started or initialized.",
+          references: [], handoffStatus: "not_checked", errorCode: callErrorCode(error),
+        };
+      }
+    }
     if (!this.config || !this.config.scope) {
       return {
         status: "unavailable", context: "ai-memory context is unavailable because its explicit workspace/project scope is not configured.",
@@ -550,6 +631,14 @@ export class AiMemoryProvider {
   }
 
   async syncOutcome(input: MemoryOutcomeInput): Promise<MemoryOutcomeResult> {
+    this.refreshConfig();
+    if (!this.config) {
+      try {
+        await this.recoverMissingBoundProfileConfig();
+      } catch (error) {
+        return { status: "unavailable", handoffStatus: "not_required", errorCode: callErrorCode(error) };
+      }
+    }
     if (!this.config || !this.config.scope) {
       return { status: "unavailable", handoffStatus: "not_required", errorCode: this.configError ?? "scope_missing" };
     }

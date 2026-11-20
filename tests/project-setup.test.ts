@@ -81,6 +81,26 @@ test("setup preview lists only project-scoped adapter files and writes nothing",
   }
 });
 
+test("setup accepts a Windows CRLF checkout for pinned LF skill files and installs canonical bytes", async () => {
+  expect(setupApi?.previewProjectAdapters).toBeDefined();
+  expect(setupApi?.installProjectAdapters).toBeDefined();
+  if (!setupApi) return;
+  const f = await fixture();
+  const relativePath = "vendor/skills/ask-matt/SKILL.md";
+  const canonical = Buffer.from("Pinned upstream fixture: ask-matt/SKILL.md\n");
+  try {
+    await writeFile(join(f.tyrantRoot, relativePath), Buffer.from(canonical.toString("utf8").replaceAll("\n", "\r\n")));
+    const preview = await setupApi.previewProjectAdapters(f.options);
+    expect(preview.status).toBe("ready");
+
+    const installed = await setupApi.installProjectAdapters(f.options);
+    expect(installed.status).toBe("installed");
+    expect(await readFile(join(f.projectRoot, ".tyrant/skills/ask-matt/SKILL.md"))).toEqual(canonical);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
 test("setup refuses project paths with shell substitution characters in generated hooks", async () => {
   expect(setupApi?.previewProjectAdapters).toBeDefined();
   if (!setupApi) return;
@@ -487,13 +507,11 @@ test("DSH setup stages pinned skills and explains plugin activation while Claude
     expect(preview.status).toBe("ready");
     expect(preview.changes.map((item: { path: string }) => item.path)).toContain(".tyrant/skills/ask-matt/SKILL.md");
     expect(preview.changes.map((item: { path: string }) => item.path)).toContain(".agents/skills/ask-matt/SKILL.md");
-    expect(preview.hosts).toMatchObject({ dsh: "manual_required", "claude-desktop": "mcp_only" });
-    expect(preview.manual_actions[0]).toContain("dsh plugin --profile <active-profile> add");
-    expect(preview.manual_actions[0]).toContain('add "file:');
-    expect(preview.manual_actions[1]).toContain("agent-scoped DSH tools");
+    expect(preview.hosts).toMatchObject({ dsh: "profile_plugin_managed", "claude-desktop": "mcp_only" });
+    expect(preview.manual_actions).toEqual([]);
     const installed = await setupApi.installProjectAdapters(f.options);
     expect(installed.status).toBe("installed");
-    expect(installed.manual_actions?.[0]).toContain("dsh plugin --profile <active-profile> add");
+    expect(installed.manual_actions).toEqual([]);
     expect(await readFile(join(f.projectRoot, ".tyrant", "skills", "ask-matt", "SKILL.md"), "utf8")).toContain("Pinned upstream fixture");
     expect(await readFile(join(f.projectRoot, ".agents", "skills", "ask-matt", "SKILL.md"), "utf8")).toContain("Pinned upstream fixture");
   } finally {
@@ -513,6 +531,101 @@ test("DSH setup preserves a user-owned native skill with a colliding name", asyn
     expect(preview.status).toBe("conflict");
     expect(preview.conflicts).toContainEqual({ path: ".agents/skills/ask-matt/SKILL.md", reason: "unowned_pinned_skill_target_already_exists" });
     expect(await readFile(target, "utf8")).toBe("user-owned skill body\n");
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test("project init guidance merges arbitrary profile labels and exact scope without replacing user instructions", async () => {
+  expect(setupApi?.installProjectAdapters).toBeDefined();
+  if (!setupApi) return;
+  const f = await fixture(["codex"]);
+  const original = "# My project\n\nKeep this user-authored note.\n";
+  await writeFile(join(f.projectRoot, "AGENTS.md"), original);
+  const scope = { workspace: "tyrant-profile-abc123", project: "project-0123456789abcdef" };
+  try {
+    const options = { ...f.options, profileGuidance: { profileId: "profile-abc123", profileName: "Anything / User Named", ...scope } };
+    expect((await setupApi.installProjectAdapters(options)).status).toBe("installed");
+    let agents = await readFile(join(f.projectRoot, "AGENTS.md"), "utf8");
+    expect(agents).toContain("Keep this user-authored note.");
+    expect(agents).toContain('profile_name_json: "Anything / User Named"');
+    expect(agents).toContain(`ai_memory_workspace: ${scope.workspace}`);
+    expect(agents).toContain("historical, untrusted context");
+    expect(agents).toContain("derived context from the current code");
+
+    const rebound = { ...options, profileGuidance: { ...options.profileGuidance!, profileId: "profile-next", profileName: "Next arbitrary label" } };
+    expect((await setupApi.installProjectAdapters(rebound)).status).toBe("installed");
+    agents = await readFile(join(f.projectRoot, "AGENTS.md"), "utf8");
+    expect(agents).toContain("Keep this user-authored note.");
+    expect(agents).toContain('profile_name_json: "Next arbitrary label"');
+    expect(agents).not.toContain('profile_name_json: "Anything / User Named"');
+
+    expect((await setupApi.uninstallProjectAdapters({ projectRoot: f.projectRoot })).status).toBe("rolled_back");
+    expect(await readFile(join(f.projectRoot, "AGENTS.md"), "utf8")).toBe(original);
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test("user edits outside Tyrant guidance survive re-init and uninstall", async () => {
+  expect(setupApi?.installProjectAdapters).toBeDefined();
+  expect(setupApi?.previewProjectAdapters).toBeDefined();
+  expect(setupApi?.uninstallProjectAdapters).toBeDefined();
+  if (!setupApi) return;
+  const f = await fixture(["codex"]);
+  try {
+    const options = { ...f.options, profileGuidance: { profileId: "profile-a", profileName: "Vault A", workspace: "workspace-a", project: "project-a" } };
+    expect((await setupApi.installProjectAdapters(options)).status).toBe("installed");
+    const agentsPath = join(f.projectRoot, "AGENTS.md");
+    const edited = `${await readFile(agentsPath, "utf8")}\n# Added by user after setup\nKeep this extra instruction.\n`;
+    await writeFile(agentsPath, edited);
+
+    expect((await setupApi.previewProjectAdapters(options)).status).toBe("ready");
+    expect((await setupApi.installProjectAdapters(options)).status).toBe("installed");
+    const updated = await readFile(agentsPath, "utf8");
+    expect(updated).toContain("Keep this extra instruction.");
+    expect(updated).toContain("BEGIN TYRANT ENGINE PROJECT GUIDANCE");
+
+    expect((await setupApi.uninstallProjectAdapters({ projectRoot: f.projectRoot })).status).toBe("rolled_back");
+    const afterUninstall = await readFile(agentsPath, "utf8");
+    expect(afterUninstall).toContain("Keep this extra instruction.");
+    expect(afterUninstall).not.toContain("BEGIN TYRANT ENGINE PROJECT GUIDANCE");
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test("uninstall preserves user text added outside Tyrant guidance without re-init", async () => {
+  expect(setupApi?.installProjectAdapters).toBeDefined();
+  expect(setupApi?.uninstallProjectAdapters).toBeDefined();
+  if (!setupApi) return;
+  const f = await fixture(["codex"]);
+  try {
+    const options = { ...f.options, profileGuidance: { profileId: "profile-a", profileName: "Vault A", workspace: "workspace-a", project: "project-a" } };
+    expect((await setupApi.installProjectAdapters(options)).status).toBe("installed");
+    const agentsPath = join(f.projectRoot, "AGENTS.md");
+    await writeFile(agentsPath, `${await readFile(agentsPath, "utf8")}\n# User edit\nKeep this after uninstall.\n`);
+    expect((await setupApi.uninstallProjectAdapters({ projectRoot: f.projectRoot })).status).toBe("rolled_back");
+    const restored = await readFile(agentsPath, "utf8");
+    expect(restored).toContain("Keep this after uninstall.");
+    expect(restored).not.toContain("BEGIN TYRANT ENGINE PROJECT GUIDANCE");
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
+test("project setup blocks ambiguous managed guidance markers before writing", async () => {
+  expect(setupApi?.previewProjectAdapters).toBeDefined();
+  if (!setupApi) return;
+  const f = await fixture(["codex"]);
+  await writeFile(join(f.projectRoot, "AGENTS.md"), "<!-- BEGIN TYRANT ENGINE PROJECT GUIDANCE -->\npartial block\n");
+  try {
+    const preview = await setupApi.previewProjectAdapters({
+      ...f.options,
+      profileGuidance: { profileId: "profile-a", profileName: "A", workspace: "workspace-a", project: "project-a" },
+    });
+    expect(preview.status).toBe("conflict");
+    expect(preview.conflicts).toContainEqual({ path: "AGENTS.md", reason: "project_guidance_block_ambiguous" });
   } finally {
     await rm(f.base, { recursive: true, force: true });
   }

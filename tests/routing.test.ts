@@ -183,6 +183,28 @@ test("bug reports allow safe diagnosis while provider context remains unavailabl
   expect(route.blockers.map((blocker: any) => blocker.provider)).not.toContain("graphify");
   expect(prepared.task.status).toBe("active");
 });
+
+test("read-only status smoke checks do not trigger diagnosis or implementation skills", () => {
+  for (const task of [
+    "Check the Tyrant MCP skills-list tool availability once. Report its status, blocker, or error code. This is read-only: do not inspect or modify project files, and do not run shell commands.",
+    "Kiểm tra status Tyrant; nếu có lỗi thì báo mã lỗi, không đọc/sửa file và không chạy shell.",
+  ]) {
+    const route = routeTask(task, { aiMemoryReady: true, graphifyReady: true, graphifyMapStatus: "current" });
+    expect(route.specialists).toEqual([]);
+    expect(route.blockers).toEqual([]);
+  }
+});
+
+test("read-only root-cause diagnosis loads diagnosis guidance without TDD", () => {
+  const route = routeTask(
+    "Investigate why the Tyrant hook was blocked and report the root cause; do not modify project files.",
+    { aiMemoryReady: true, graphifyReady: true, graphifyMapStatus: "current" },
+  );
+
+  expect(route.specialists.map((skill) => skill.skill_id)).toContain("matt-diagnosing-bugs");
+  expect(route.specialists.map((skill) => skill.skill_id)).not.toContain("matt-tdd");
+});
+
 test("non-security audits and code explanations do not trigger implementation or security routes", async () => {
   const audit = await prepareTask("Audit code quality and API response time", "route-nonsecurity-audit-001");
   const auditRoute = audit.route as Record<string, any>;

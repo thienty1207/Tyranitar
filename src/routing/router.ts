@@ -43,6 +43,8 @@ function securityAuditPolicy(mode: SecurityAuditMode) {
 }
 
 const CATALOG_BY_ID = new Map(SKILL_CATALOG.map((skill) => [skill.id, skill]));
+const CODE_CHANGE_ACTION = /\b(implement\w*|build\w*|add\w*|fix\w*|refactor\w*|write\w*|modify\w*|create\w*|delete\w*|trien khai|sua|them|tao|viet|cap nhat|xay dung|xoa)\b/;
+const NEGATED_CODE_CHANGE = /\b(?:do not|don't|dont|will not|won't|never)\b.{0,100}\b(?:edit|modify|change|write|add|create|fix|refactor|implement|delete)\b.{0,80}\b(?:code|source|files?|project|repository|repo)\b|\bkhong\b.{0,80}\b(?:sua|chinh sua|thay doi|viet|them|tao|trien khai|cap nhat|xoa)\b.{0,50}\b(?:file|code|source|du an|project|repo)\b/;
 
 function catalogEntry(skillId: string) {
   const entry = CATALOG_BY_ID.get(skillId);
@@ -95,10 +97,6 @@ export function routeTask(task: string, options: {
     intent,
     /\b(frontend|front-end|ui|ux|css|html|react|vue|svelte|component|landing page|giao dien|trang web|man hinh|dashboard)\b/,
   );
-  const bugReport = hasPattern(
-    intent,
-    /\b(bug|issue|error|crash|fail|failure|broken|regression|diagnos\w*|debug\w*|unexpected behavior|loi|su co|chan doan|hong)\b/,
-  );
   const codeReviewRequested = /\b(code review|review (?:my |this |the )?(?:code|patch|change|implementation|pr|pull request)|(?:pr|pull request) review|xem lai (?:doan |phan |file )?(?:code|pr|pull request))\b/.test(intent);
   const manualMattRequested = /\b(?:use|invoke|load|call|consult|run|ask|dung|goi|mo)\s+(?:the\s+)?(?:native\s+)?ask[- ]?matt\b/.test(intent)
     || /\b(?:which|what)\s+(?:matt(?: pocock)?|ask[- ]?matt)(?:'s)?\s+(?:skill|flow|workflow)\b/.test(intent)
@@ -106,10 +104,14 @@ export function routeTask(task: string, options: {
     || /\b(?:hoi|hỏi)\s+matt\b/.test(intent);
   const nonCodeArtifact = /\b(readme|documentation|docs?|specification|spec|plan|roadmap|report|memo|email|presentation|slides|spreadsheet|adr|changelog)\b/.test(intent);
   const codeTarget = /\b(code|function|class|component|frontend|backend|api|endpoint|database|schema|route|server|mcp|provider|tool|feature|bug|module|package|tests?|config|integration|application|app|source|repository|project)\b/.test(intent);
-  const codeChange = hasPattern(
-    intent,
-    /\b(implement\w*|build\w*|add\w*|fix\w*|refactor\w*|write\w*|modify\w*|create\w*|trien khai|sua|them|tao|viet|cap nhat|xay dung)\b/,
-  ) && (!nonCodeArtifact || codeTarget);
+  const codeChange = hasPattern(intent, CODE_CHANGE_ACTION)
+    && !hasPattern(intent, NEGATED_CODE_CHANGE)
+    && (!nonCodeArtifact || codeTarget);
+  const diagnosisRequested = /\b(investigat\w*|diagnos\w*|debug\w*|troubleshoot\w*|root cause|trace (?:the )?(?:cause|failure|problem|error))\b/.test(intent);
+  const explicitProblem = /\b(bug|issue|crash|broken|regression|unexpected behavior|su co|hong|error (?:in|from|during|when|while)|(?:returned|produced|encountered) an? error)\b/.test(intent);
+  const failureQuestion = /\b(?:why|reason|cause)\b.{0,80}\b(?:fail\w*|error|crash|broken|regression|blocked|timeout|loi|hong)\b/.test(intent);
+  const failureBeingChanged = codeChange && /\b(error|fail\w*|failure|timeout|loi|blocked)\b/.test(intent);
+  const bugReport = explicitProblem || failureQuestion || (diagnosisRequested && /\b(error|fail\w*|failure|crash|broken|regression|blocked|timeout|loi|hong|bug|issue)\b/.test(intent)) || failureBeingChanged;
   const security = hasPattern(
     intent,
     /\b(security|secure|vulnerab\w*|exploit|penetration tests?|security risk|bao mat|lo hong|lo ngai bao mat)\b/,

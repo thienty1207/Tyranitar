@@ -5,6 +5,8 @@ import { join } from "node:path";
 import * as z from "zod/v4";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { AiMemoryProvider, getAiMemoryConfig } from "../src/providers/ai-memory";
+import { aiMemoryProfileIdentityMarker } from "../src/setup/ai-memory-runtime";
+import { activateVaultProfile, bindProjectProfile, deriveProjectProfileScope } from "../src/setup/profiles";
 
 const tempRoot = await mkdtemp(join(tmpdir(), "tyrant-ai-memory-"));
 const fixtures: Array<{ stop: () => Promise<void> }> = [];
@@ -20,6 +22,7 @@ type Fixture = {
   raceNextWrite: (key: string, body: string) => void;
   setQueryPayload: (payload: unknown) => void;
   setProxyPayload: (payload: unknown) => void;
+  setGlobalPage: (path: string, body: string) => void;
   consumeHandoffWithoutBody: () => void;
   failNextHandoffList: () => void;
   delayNextQuery: (milliseconds: number) => void;
@@ -40,7 +43,9 @@ async function createMemoryFixture(): Promise<Fixture> {
   };
   let proxyPayload: unknown;
   let pendingRace: { key: string; body: string } | undefined;
-  const keyFor = (args: Record<string, unknown>) => `${args.workspace}/${args.project}/${args.path ?? ""}`;
+  const keyFor = (args: Record<string, unknown>) => args.scope === "global"
+    ? `global/${args.path ?? ""}`
+    : `${args.workspace}/${args.project}/${args.path ?? ""}`;
   const buildServer = () => {
     const server = new McpServer({ name: "ai-memory-fixture", version: "1.0.0" });
     const addTool = (name: string, inputSchema: z.ZodType, run: (args: Record<string, unknown>) => unknown | Promise<unknown>) => {
@@ -58,12 +63,12 @@ async function createMemoryFixture(): Promise<Fixture> {
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       });
     };
-    addTool("memory_read_page", z.object({ workspace: z.string(), project: z.string(), path: z.string() }), (args) => {
+    addTool("memory_read_page", z.object({ workspace: z.string().optional(), project: z.string().optional(), path: z.string(), scope: z.enum(["profile", "global"]).optional() }), (args) => {
       const page = pages.get(keyFor(args));
       return page ? page : { __toolError: true, payload: { error: "page_not_found" } };
     });
     addTool("memory_write_page", z.object({
-      workspace: z.string(), project: z.string(), path: z.string(), body: z.string(),
+      workspace: z.string().optional(), project: z.string().optional(), path: z.string(), body: z.string(), scope: z.enum(["profile", "global"]).optional(),
       create_only: z.boolean().optional(), expected_page_id: z.string().optional(),
     }), (args) => {
       const key = keyFor(args);
@@ -143,6 +148,7 @@ async function createMemoryFixture(): Promise<Fixture> {
     raceNextWrite: (key: string, body: string) => { pendingRace = { key, body }; },
     setQueryPayload: (payload: unknown) => { queryPayload = payload; },
     setProxyPayload: (payload: unknown) => { proxyPayload = payload; },
+    setGlobalPage: (path: string, body: string) => pages.set(`global/${path}`, { page_id: `global-${pages.size + 1}`, path, body }),
     consumeHandoffWithoutBody: () => { consumeWithoutBody = true; },
     failNextHandoffList: () => { handoffListFailure = true; },
     delayNextQuery: (milliseconds: number) => { queryDelayMs = milliseconds; },
@@ -156,6 +162,31 @@ function configFor(url: string) {
     url, authToken: "local-fixture-token", scope: { workspace: "tyrant-test", project: "sample" },
     timeoutMs: 2_000, projectRoot: tempRoot,
   };
+}
+
+async function createPersistedMemoryProfile(fixture: Fixture, name: string) {
+  const root = join(tempRoot, `bound-${name}`);
+  const stateDirectory = join(root, "tyrant-state");
+  const projectRoot = join(root, "project");
+  const vaultA = join(root, "vault-a");
+  const vaultB = join(root, "vault-b");
+  await Promise.all([mkdir(projectRoot, { recursive: true }), mkdir(vaultA, { recursive: true }), mkdir(vaultB, { recursive: true })]);
+  const writeVaultConfig = async (vault: string) => {
+    await mkdir(join(vault, "auth-tokens"), { recursive: true });
+    await writeFile(join(vault, "auth-tokens", "default"), "local-fixture-token\n", "utf8");
+    await writeFile(join(vault, "config.toml"), '[auth]\nbearer_token_file = "auth-tokens/default"\n', "utf8");
+  };
+  await Promise.all([writeVaultConfig(vaultA), writeVaultConfig(vaultB)]);
+  const profileA = await activateVaultProfile({
+    id: `${name}-profile-a`, vaultPath: vaultA, name: `${name} A`, endpoint: fixture.url, configPath: join(vaultA, "config.toml"),
+  }, { stateDirectory });
+  const profileB = await activateVaultProfile({
+    id: `${name}-profile-b`, vaultPath: vaultB, name: `${name} B`, endpoint: fixture.url, configPath: join(vaultB, "config.toml"),
+  }, { stateDirectory });
+  await bindProjectProfile({ projectRoot, profile: profileA }, { stateDirectory });
+  fixture.setGlobalPage(aiMemoryProfileIdentityMarker(profileA).path, aiMemoryProfileIdentityMarker(profileA).body);
+  fixture.setGlobalPage(aiMemoryProfileIdentityMarker(profileB).path, aiMemoryProfileIdentityMarker(profileB).body);
+  return { root, stateDirectory, projectRoot, profileA, profileB };
 }
 
 afterAll(async () => {
@@ -181,8 +212,10 @@ test("ai-memory config uses explicit paired scope and TOML, never a guessed dire
 test("ai-memory auth resolves from the explicit token file or configured vault without displacing env tokens", async () => {
   const vault = join(tempRoot, "vault-token-test");
   await mkdir(vault, { recursive: true });
-  const tokenPath = join(vault, "auth-token");
+  const tokenPath = join(vault, "auth-tokens", "default");
+  await mkdir(join(vault, "auth-tokens"), { recursive: true });
   await writeFile(tokenPath, "  file-token-test-value\r\n", "utf8");
+  await writeFile(join(vault, "config.toml"), '[auth]\nbearer_token_file = "auth-tokens/default"\n', "utf8");
 
   expect(getAiMemoryConfig(tempRoot, { TYRANT_AI_MEMORY_TOKEN_FILE: tokenPath }).authToken).toBe("file-token-test-value");
   expect(getAiMemoryConfig(tempRoot, { AI_MEMORY_DATA_DIR: vault }).authToken).toBe("file-token-test-value");
@@ -345,6 +378,116 @@ test("generic AI-Memory calls apply project defaults while preserving explicit d
 
   await provider.invokeTool("memory_delete_page", { path: "_global/policy.md", scope: "global" });
   expect(fixture.calls.at(-1)).toEqual({ name: "memory_delete_page", args: { path: "_global/policy.md", scope: "global" } });
+});
+
+test("long-lived provider reloads the explicitly rebound project vault on the next operation", async () => {
+  const fixture = await createMemoryFixture();
+  const bound = await createPersistedMemoryProfile(fixture, "rebind");
+  const provider = new AiMemoryProvider(undefined, bound.projectRoot, bound.stateDirectory, {
+    inspectEndpointOwner: async () => "owned",
+    ensureProfile: async (profile) => ({ endpoint: profile.endpoint, authStatus: "ready", version: "3.4.7" }),
+  });
+
+  await provider.invokeTool("memory_briefing", {});
+  expect(fixture.calls.filter((call) => call.name === "memory_briefing").at(-1)?.args).toMatchObject({
+    workspace: `tyrant-profile-${bound.profileA.id}`,
+  });
+  const nextScope = await deriveProjectProfileScope(bound.projectRoot, bound.profileB, { stateDirectory: bound.stateDirectory });
+  await bindProjectProfile({ projectRoot: bound.projectRoot, profile: bound.profileB, explicitRebind: true, scope: nextScope.scope }, { stateDirectory: bound.stateDirectory });
+  await provider.invokeTool("memory_briefing", {});
+
+  const briefings = fixture.calls.filter((call) => call.name === "memory_briefing");
+  expect(briefings).toHaveLength(2);
+  expect(briefings[1]?.args).toMatchObject({ workspace: `tyrant-profile-${bound.profileB.id}` });
+  expect(fixture.calls.filter((call) => call.name === "memory_read_page" && call.args.scope === "global").map((call) => call.args.path)).toContain(aiMemoryProfileIdentityMarker(bound.profileB).path);
+});
+
+test("automatically ensures the currently bound AI-Memory vault before each provider operation", async () => {
+  const fixture = await createMemoryFixture();
+  const bound = await createPersistedMemoryProfile(fixture, "runtime-ensure");
+  const ensureCalls: Array<{ profileId: string; stateDirectory?: string }> = [];
+  const provider = new AiMemoryProvider(undefined, bound.projectRoot, bound.stateDirectory, {
+    inspectEndpointOwner: async () => "owned",
+    ensureProfile: async (profile, options) => {
+      ensureCalls.push({ profileId: profile.id, stateDirectory: options?.stateDirectory });
+      expect(options?.initialize).toBe(true);
+      return { endpoint: profile.endpoint, authStatus: "ready", version: "3.4.7" };
+    },
+  });
+
+  const result = await provider.invokeTool("memory_briefing", {});
+
+  expect(result.isError).toBeFalsy();
+  expect(ensureCalls).toEqual([{ profileId: bound.profileA.id, stateDirectory: bound.stateDirectory }]);
+  expect(fixture.calls.map((call) => call.name)).toContain("memory_briefing");
+});
+
+test("self-initializes a missing bound vault config before resolving its auth token", async () => {
+  const fixture = await createMemoryFixture();
+  const bound = await createPersistedMemoryProfile(fixture, "runtime-initialize");
+  await rm(bound.profileA.configPath, { force: true });
+  await rm(join(bound.profileA.vaultPath, "auth-tokens", "default"), { force: true });
+  let initialized = false;
+  const provider = new AiMemoryProvider(undefined, bound.projectRoot, bound.stateDirectory, {
+    inspectEndpointOwner: async () => "owned",
+    ensureProfile: async (profile, options) => {
+      initialized = options?.initialize === true;
+      await mkdir(join(profile.vaultPath, "auth-tokens"), { recursive: true });
+      await writeFile(join(profile.vaultPath, "auth-tokens", "default"), "local-fixture-token\n", "utf8");
+      await writeFile(profile.configPath, '[auth]\nbearer_token_file = "auth-tokens/default"\n', "utf8");
+      return { endpoint: profile.endpoint, authStatus: "ready", version: "3.4.7" };
+    },
+  });
+
+  const result = await provider.invokeTool("memory_briefing", {});
+
+  expect(initialized).toBe(true);
+  expect(result.isError).toBeFalsy();
+  expect(fixture.calls.map((call) => call.name)).toContain("memory_briefing");
+});
+
+test("reports a stable error when automatic AI-Memory runtime recovery fails", async () => {
+  const fixture = await createMemoryFixture();
+  const bound = await createPersistedMemoryProfile(fixture, "runtime-failure");
+  const provider = new AiMemoryProvider(undefined, bound.projectRoot, bound.stateDirectory, {
+    ensureProfile: async () => { throw new Error("ai_memory_download_failed"); },
+  });
+
+  const result = await provider.loadContext({ summary: "Start with the vault offline", resume: false });
+
+  expect(result).toMatchObject({ status: "incomplete", errorCode: "ai_memory_download_failed" });
+  expect(fixture.calls).toEqual([]);
+});
+
+test("does not start a vault when the task has no explicit project scope", async () => {
+  const fixture = await createMemoryFixture();
+  let ensureCalls = 0;
+  const provider = new AiMemoryProvider({ ...configFor(fixture.url), scope: null }, undefined, undefined, {
+    ensureProfile: async () => { ensureCalls += 1; throw new Error("must_not_start"); },
+  });
+
+  const result = await provider.loadContext({ summary: "Unscoped task", resume: false });
+
+  expect(result).toMatchObject({ status: "unavailable", errorCode: "scope_missing" });
+  expect(ensureCalls).toBe(0);
+});
+
+test("provider blocks an operation before connecting when endpoint ownership changes", async () => {
+  const fixture = await createMemoryFixture();
+  const bound = await createPersistedMemoryProfile(fixture, "owner-change");
+  let ownerChecks = 0;
+  const provider = new AiMemoryProvider(undefined, bound.projectRoot, bound.stateDirectory, {
+    inspectEndpointOwner: async () => ++ownerChecks <= 2 ? "owned" : "foreign",
+    ensureProfile: async (profile) => ({ endpoint: profile.endpoint, authStatus: "ready", version: "3.4.7" }),
+  });
+
+  await provider.invokeTool("memory_briefing", {});
+  const firstResult = fixture.calls.filter((call) => call.name === "memory_briefing");
+  expect(firstResult).toHaveLength(1);
+  const blocked = await provider.invokeTool("memory_briefing", {});
+  expect(blocked.isError).toBe(true);
+  expect(ownerChecks).toBe(3);
+  expect(fixture.calls.filter((call) => call.name === "memory_briefing")).toHaveLength(1);
 });
 
 test("generic AI-Memory calls preserve message destination and default sender scope", async () => {

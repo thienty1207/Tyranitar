@@ -52,6 +52,11 @@ test("refreshes a local code-only map, runs a bounded query, and returns stable 
   expect(invocations.map((invocation) => invocation.args[0])).toEqual(["extract", "query"]);
   expect(invocations[0].args).toContain("--code-only");
   expect(invocations[0].args).toContain("--no-label");
+  expect(invocations[0].args).toContain("--exclude");
+  expect(invocations[0].args).toContain(".tyrant");
+  expect(invocations[0].args).toContain(".agents/skills");
+  expect(invocations[0].args).toContain(".opencode/plugins");
+  expect(invocations[0].args).not.toContain(".opencode");
   expect(invocations[0].args).toContain("--out");
   expect(invocations[0].env.GRAPHIFY_BACKEND).toBe("none");
   expect(invocations[0].env.GRAPHIFY_OUT).toBe(join(projectRoot, "graphify-out"));
@@ -261,4 +266,78 @@ test("keeps a fresh map visible but blocks when the scoped query fails", async (
   expect(result).toMatchObject({ status: "incomplete", mapStatus: "current", errorCode: "query_failed" });
   expect(result.references).toEqual([]);
   expect(invocations.map((invocation) => invocation.args[0])).toEqual(["extract", "query"]);
+});
+
+test("resolves the Tyrant-managed pinned Graphify runtime before running the project provider", async () => {
+  const projectRoot = await createProject("managed-runtime");
+  const invocations: GraphifyInvocation[] = [];
+  const provider = new GraphifyProvider({
+    projectRoot,
+    runtimeStatus: async () => ({ status: "ready", source: "managed", version: "0.9.109", executable: "managed-graphify.exe" }),
+    runner: async (invocation) => {
+      invocations.push(invocation);
+      if (invocation.args[0] === "extract") await writeGraph(projectRoot);
+      return { exitCode: 0, stdout: invocation.args[0] === "query" ? "entry point" : "updated", stderr: "", timedOut: false };
+    },
+  });
+  const result = await provider.loadContext({ summary: "Find the entry point" });
+  expect(result.status).toBe("ready");
+  expect(invocations.map((invocation) => invocation.executable)).toEqual(["managed-graphify.exe", "managed-graphify.exe"]);
+});
+
+test("bootstraps a missing Graphify runtime before refreshing the project's map", async () => {
+  const projectRoot = await createProject("runtime-recovery");
+  const invocations: GraphifyInvocation[] = [];
+  let ensureCalls = 0;
+  const provider = new GraphifyProvider({
+    projectRoot,
+    runtimeStatus: async () => ({ status: "missing" }),
+    ensureRuntime: async () => {
+      ensureCalls += 1;
+      return { status: "ready", source: "managed", version: "0.9.109", executable: "recovered-graphify.exe" };
+    },
+    runner: async (invocation) => {
+      invocations.push(invocation);
+      if (invocation.args[0] === "extract") await writeGraph(projectRoot);
+      return { exitCode: 0, stdout: "project symbol", stderr: "", timedOut: false };
+    },
+  });
+
+  const result = await provider.loadContext({ summary: "Find the project symbol" });
+
+  expect(ensureCalls).toBe(1);
+  expect(result).toMatchObject({ status: "ready", mapStatus: "current" });
+  expect(invocations.map((invocation) => invocation.executable)).toEqual(["recovered-graphify.exe", "recovered-graphify.exe"]);
+});
+
+test("reports a recoverable Graphify setup failure without invoking an absent executable", async () => {
+  const projectRoot = await createProject("runtime-recovery-failed");
+  let invoked = false;
+  const provider = new GraphifyProvider({
+    projectRoot,
+    runtimeStatus: async () => ({ status: "missing" }),
+    ensureRuntime: async () => { throw new Error("graphify_install_failed"); },
+    runner: async () => { invoked = true; return { exitCode: 0, stdout: "", stderr: "", timedOut: false }; },
+  });
+
+  const result = await provider.loadContext({ summary: "Inspect the project" });
+
+  expect(result).toMatchObject({ status: "unavailable", mapStatus: "missing", errorCode: "graphify_install_failed" });
+  expect(invoked).toBe(false);
+});
+
+test("refuses an unverified Graphify runtime version before invoking the CLI", async () => {
+  const projectRoot = await createProject("runtime-version-mismatch");
+  let invoked = false;
+  let ensureCalls = 0;
+  const provider = new GraphifyProvider({
+    projectRoot,
+    runtimeStatus: async () => ({ status: "version_mismatch", source: "system", version: "0.8.0", executable: "wrong-graphify.exe" }),
+    ensureRuntime: async () => { ensureCalls += 1; throw new Error("graphify_version_mismatch"); },
+    runner: async () => { invoked = true; return { exitCode: 0, stdout: "", stderr: "", timedOut: false }; },
+  });
+  const result = await provider.loadContext({ summary: "Inspect current map" });
+  expect(result).toMatchObject({ status: "unavailable", errorCode: "version_mismatch" });
+  expect(ensureCalls).toBe(1);
+  expect(invoked).toBe(false);
 });

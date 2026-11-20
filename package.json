@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "main": "./integrations/dsh/index.js",
+  "bin": { "tyrant": "./src/cli.ts" },
   "type": "module",
   "engines": {
     "node": ">=20",
@@ -17,6 +18,7 @@
     "build:integrations": "bun run build:command-hook && bun run build:dsh && bun run build:opencode",
     "sync:ai-memory-tools": "bun run scripts/sync-ai-memory-tools.ts",
     "setup:project": "bun run src/adapters/project-setup.ts",
+    "tyrant": "bun run src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

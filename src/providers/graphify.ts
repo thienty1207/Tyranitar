@@ -2,12 +2,15 @@ import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { redactSensitiveText } from "../state/redaction";
+import { ensureGraphifyRuntime, graphifyRuntimeStatus, type GraphifyRuntimeStatus } from "../setup/graphify-runtime";
 
 const MAX_QUERY_CHARS = 600;
 const MAX_QUERY_CONTEXT_CHARS = 3_000;
 const MAX_PROCESS_OUTPUT_CHARS = 16_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const NO_MATCH_EXIT_CODES = new Set([3, 4]);
+// These paths contain Tyrant-installed adapters and bundled skills, not the host project's application code.
+const TYRANT_ARTIFACT_EXCLUDES = [".tyrant", ".agents/skills", ".opencode/plugins"] as const;
 const SECRET_ENVIRONMENT_KEY = /(?:API[_-]?KEY|(?:^|[_-])(?:ACCESS[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|AUTH[_-]?TOKEN|SESSION[_-]?TOKEN|TOKEN|KEY|SECRET|PASSWORD|CREDENTIALS?)(?:$|[_-])|BASE[_-]?URL)/i;
 
 export type GraphifyInvocation = {
@@ -41,6 +44,8 @@ type GraphifyProviderOptions = {
   executable?: string | null;
   timeoutMs?: number;
   runner?: GraphifyRunner;
+  runtimeStatus?: () => Promise<GraphifyRuntimeStatus>;
+  ensureRuntime?: () => Promise<GraphifyRuntimeStatus & { status: "ready" }>;
 };
 
 function sha256(value: string | Uint8Array) {
@@ -149,18 +154,19 @@ function result(
 export class GraphifyProvider {
   private readonly projectRoot: string;
   private readonly executable: string | null;
+  private readonly resolveRuntime: boolean;
+  private readonly runtimeStatus: () => Promise<GraphifyRuntimeStatus>;
+  private readonly ensureRuntime: () => Promise<GraphifyRuntimeStatus & { status: "ready" }>;
   private readonly timeoutMs: number;
   private readonly runner: GraphifyRunner;
   private operationQueue: Promise<void> = Promise.resolve();
 
   constructor(options: GraphifyProviderOptions = {}) {
     this.projectRoot = resolve(options.projectRoot ?? process.env.TYRANT_PROJECT_ROOT ?? process.cwd());
-    if (options.executable !== undefined) {
-      this.executable = options.executable?.trim() || null;
-    } else {
-      const configuredExecutable = process.env.TYRANT_GRAPHIFY_BIN?.trim();
-      this.executable = configuredExecutable || Bun.which("graphify") || null;
-    }
+    this.resolveRuntime = options.executable === undefined;
+    this.executable = options.executable?.trim() || null;
+    this.runtimeStatus = options.runtimeStatus ?? (() => graphifyRuntimeStatus());
+    this.ensureRuntime = options.ensureRuntime ?? (() => ensureGraphifyRuntime());
     const timeoutValue = options.timeoutMs ?? Number(process.env.TYRANT_GRAPHIFY_TIMEOUT_MS);
     this.timeoutMs = Number.isFinite(timeoutValue) && timeoutValue >= 1_000 && timeoutValue <= 300_000
       ? timeoutValue
@@ -177,7 +183,28 @@ export class GraphifyProvider {
   private async loadContextNow(input: { summary: string; timeoutMs?: number }): Promise<GraphifyContextResult> {
     const graphPath = resolve(this.projectRoot, "graphify-out", "graph.json");
     const outputRoot = resolve(this.projectRoot, "graphify-out");
-    if (!this.executable) return result("unavailable", await pathExists(graphPath) ? "stale" : "missing", "command_missing");
+    let executable = this.executable;
+    if (!executable && this.resolveRuntime) {
+      let runtime: GraphifyRuntimeStatus;
+      try {
+        runtime = await this.runtimeStatus();
+      } catch {
+        runtime = { status: "missing" };
+      }
+      if (runtime.status === "ready") executable = runtime.executable ?? null;
+      else {
+        try {
+          const recovered = await this.ensureRuntime();
+          executable = recovered.executable ?? null;
+        } catch (error) {
+          const errorCode = error instanceof Error ? error.message : "graphify_runtime_unavailable";
+          const stableCode = /^[a-z][a-z0-9_]{1,63}$/.test(errorCode) ? errorCode : "graphify_runtime_unavailable";
+          const isVersionMismatch = runtime.status === "version_mismatch" || /version_mismatch/.test(stableCode);
+          return result("unavailable", await pathExists(graphPath) ? "stale" : "missing", isVersionMismatch ? "version_mismatch" : stableCode);
+        }
+      }
+    }
+    if (!executable) return result("unavailable", await pathExists(graphPath) ? "stale" : "missing", "command_missing");
 
     let projectRoot: string;
     try {
@@ -194,13 +221,15 @@ export class GraphifyProvider {
       ? Math.min(this.timeoutMs, Math.floor(input.timeoutMs!))
       : this.timeoutMs;
     const invoke = (args: string[]) => this.runner({
-      executable: this.executable!, args, cwd: projectRoot, env, timeoutMs: operationTimeoutMs,
+      executable: executable!, args, cwd: projectRoot, env, timeoutMs: operationTimeoutMs,
     });
 
     let refresh: GraphifyRunResult;
     try {
       refresh = await invoke([
-        "extract", projectRoot, "--code-only", "--no-viz", "--no-label", "--out", projectRoot,
+        "extract", projectRoot, "--code-only", "--no-viz", "--no-label",
+        ...TYRANT_ARTIFACT_EXCLUDES.flatMap((path) => ["--exclude", path]),
+        "--out", projectRoot,
       ]);
     } catch {
       const existing = await pathExists(graphPath);

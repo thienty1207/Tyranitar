@@ -3,9 +3,11 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { InProcessTyrantTool } from "./local-tools";
+import { resolveProjectProfileSync } from "../setup/profiles";
 
 const TYRANT_ENVIRONMENT_KEYS = [
   "AI_MEMORY_DATA_DIR",
+  "AI_MEMORY_CONFIG_PATH",
   "AI_MEMORY_SERVER_URL",
   "AI_MEMORY_AUTH_TOKEN",
   "AI_MEMORY_TOKEN_FILE",
@@ -22,6 +24,19 @@ const TYRANT_ENVIRONMENT_KEYS = [
   "CODEX_HOME",
   "OPENCODE_CONFIG_DIR",
   "BUN_INSTALL",
+] as const;
+
+const PROJECT_BOUND_AI_MEMORY_OVERRIDES = [
+  "AI_MEMORY_DATA_DIR",
+  "AI_MEMORY_CONFIG_PATH",
+  "AI_MEMORY_SERVER_URL",
+  "AI_MEMORY_AUTH_TOKEN",
+  "AI_MEMORY_TOKEN_FILE",
+  "TYRANT_AI_MEMORY_URL",
+  "TYRANT_AI_MEMORY_AUTH_TOKEN",
+  "TYRANT_AI_MEMORY_TOKEN_FILE",
+  "TYRANT_AI_MEMORY_WORKSPACE",
+  "TYRANT_AI_MEMORY_PROJECT",
 ] as const;
 
 export type DshTyrantMcpClient = {
@@ -41,6 +56,18 @@ export function createDshTyrantChildEnvironment(
     if (typeof value === "string") childEnvironment[key] = value;
   }
   childEnvironment.TYRANT_PROJECT_ROOT = resolve(projectRoot);
+
+  // DSH may load ~/.dsh/.env into its process environment. A bound project
+  // must get its endpoint, credential and scope only from its saved vault
+  // profile; forwarding global AI-Memory overrides makes the provider fail
+  // closed with profile_auth_override_blocked (or risk cross-vault routing).
+  const binding = resolveProjectProfileSync(projectRoot, {
+    stateDirectory: sourceEnvironment.TYRANT_STATE_DIR,
+    env: sourceEnvironment,
+  });
+  if (binding) {
+    for (const key of PROJECT_BOUND_AI_MEMORY_OVERRIDES) delete childEnvironment[key];
+  }
   return childEnvironment;
 }
 
