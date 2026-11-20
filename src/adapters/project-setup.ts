@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readAdapterActivation, type AutomaticAdapterHost } from "./activation";
+import { canonicalPathIdentity } from "../state/path-identity";
 
 export { recordAdapterExecution } from "./activation";
 
@@ -65,11 +66,7 @@ export class VerifiedPinnedSkillBundle {
   }
 
   filesFor(root: string): ProposedFile[] {
-    const selected = resolve(root);
-    const matches = process.platform === "win32"
-      ? selected.toLocaleLowerCase("en-US") === this.root.toLocaleLowerCase("en-US")
-      : selected === this.root;
-    if (!matches) throw new Error("pinned_skill_bundle_root_mismatch");
+    if (canonicalPathIdentity(root) !== canonicalPathIdentity(this.root)) throw new Error("pinned_skill_bundle_root_mismatch");
     return this.files;
   }
 }

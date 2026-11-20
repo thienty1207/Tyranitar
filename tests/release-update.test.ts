@@ -8,7 +8,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { afterAll } from "bun:test";
 import { activateVaultProfile, bindProjectProfile, resolveProjectProfile } from "../src/setup/profiles";
 import { registerInstalledProject } from "../src/setup/install-state";
-import { installProjectAdapters } from "../src/adapters/project-setup";
+import { installProjectAdapters, VerifiedPinnedSkillBundle } from "../src/adapters/project-setup";
 
 const releaseUpdateApi = await import("../src/setup/release-update").catch(() => undefined);
 const fixtures = await mkdtemp(join(tmpdir(), "tyrant-release-update-"));
@@ -189,6 +189,8 @@ test("default update refreshes registered projects while preserving their vault 
   await Promise.all([mkdir(projectRoot, { recursive: true }), mkdir(vaultPath, { recursive: true })]);
   await engineFixture(firstEngineRoot, "// Tyrant 0.1.0 hook\n");
   await engineFixture(nextEngineRoot, "// Tyrant 0.1.1 hook\n");
+  const verifiedBundle = await VerifiedPinnedSkillBundle.load(nextEngineRoot);
+  expect(verifiedBundle.filesFor(nextEngineRoot)).toHaveLength(10);
   const profile = await activateVaultProfile({ vaultPath, name: "Project vault", endpoint: "http://127.0.0.1:49375/mcp", configPath: join(vaultPath, "config.toml") }, { stateDirectory });
   const binding = await bindProjectProfile({ projectRoot, profile }, { stateDirectory });
   const guidance = { profileId: profile.id, profileName: profile.name, ...binding.scope };
