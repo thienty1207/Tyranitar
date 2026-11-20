@@ -1,6 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { resolve } from "node:path";
 import { createTyrantServer } from "../mcp/server";
+import { TYRANT_VERSION } from "../version";
 import type { TyrantToolCaller } from "./auto-preflight";
 
 export type InProcessTyrantTool = {
@@ -25,7 +26,7 @@ export async function openInProcessTyrantMcpClient(
     projectRoot: resolve(projectRoot),
     ...(options.stateDirectory ? { stateDirectory: resolve(options.stateDirectory) } : {}),
   });
-  const client = new Client({ name: "tyrant-host-adapter", version: "0.1.0" });
+  const client = new Client({ name: "tyrant-host-adapter", version: TYRANT_VERSION });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await server.connect(serverTransport);

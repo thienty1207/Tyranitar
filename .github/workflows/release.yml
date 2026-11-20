@@ -1,0 +1,64 @@
+name: Publish Tyrant release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tyrant-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Run unit and integration tests
+        run: bun test
+
+      - name: Verify PowerShell installer contract
+        shell: pwsh
+        run: ./tests/installers/install-contract.ps1
+
+      - name: Build host integration bundles
+        run: bun run build:integrations
+
+      - name: Package Windows x64 release
+        shell: pwsh
+        run: ./scripts/package-release.ps1 -ReleaseTag '${{ github.ref_name }}'
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tyrant ${{ github.ref_name }}
+          body: |
+            Install on Windows x64:
+
+            ```powershell
+            irm https://github.com/thienty1207/Tyranitar/releases/latest/download/install.ps1 | iex
+            tyrant setup "D:\AI-MEMORY"
+            ```
+
+            In each project folder, run `tyrant init`. Future releases can be installed with `tyrant update`.
+          files: |
+            dist/tyrant-engine-*-windows-x64.zip
+            installers/install.ps1
+          fail_on_unmatched_files: true
+          generate_release_notes: true

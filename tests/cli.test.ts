@@ -3,6 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runTyrantCli, type TyrantCliDependencies } from "../src/cli";
+import { loadInstallState } from "../src/setup/install-state";
 import { activateVaultProfile, bindProjectProfile, loadProfileRegistry } from "../src/setup/profiles";
 
 const root = await mkdtemp(join(tmpdir(), "tyrant-cli-setup-"));
@@ -52,6 +53,37 @@ test("setup uses a user-supplied label and changes the default only after provid
   expect(calls.map((call) => call.kind)).toEqual(["graphify", "memory", "dsh"]);
   expect(JSON.parse(output.join("")).dsh_plugin).toMatchObject({ status: "installed", profile: "desktop" });
   expect(JSON.parse(output.join("")).active_default.name).toBe("Workshop / whatever");
+  expect((await loadInstallState({ stateDirectory: f.stateDirectory })).dsh_profile).toBe("desktop");
+});
+
+test("setup persists a selected DSH profile for future update refreshes", async () => {
+  const f = await fixture("setup-custom-dsh-profile");
+  const { deps } = dependencies(f);
+  expect(await runTyrantCli(["setup", f.vaultA, "--dsh-profile", "workstation"], deps)).toBe(0);
+  expect((await loadInstallState({ stateDirectory: f.stateDirectory })).dsh_profile).toBe("workstation");
+});
+
+test("update delegates release installation and returns a structured version result", async () => {
+  const f = await fixture("update-command");
+  const { deps, output, calls } = dependencies(f);
+  deps.updateTyrant = async () => ({
+    status: "updated",
+    previous_version: "0.1.0",
+    version: "0.1.1",
+    dsh_plugin: { status: "installed", profile: "desktop" },
+    projects: [{ project_root: f.project, status: "updated" }],
+  });
+
+  expect(await runTyrantCli(["update"], deps)).toBe(0);
+  expect(JSON.parse(output.join(""))).toMatchObject({ status: "updated", previous_version: "0.1.0", version: "0.1.1" });
+  expect(calls).toEqual([]);
+});
+
+test("prints the installed release version in a copyable CLI format", async () => {
+  const f = await fixture("version-command");
+  const { deps, output } = dependencies(f);
+  expect(await runTyrantCli(["--version"], deps)).toBe(0);
+  expect(output.join("")).toBe("tyrant 0.1.1\n");
 });
 
 test("setup without a vault path uses the current directory label and switches future project default", async () => {
@@ -93,6 +125,8 @@ test("init preserves a project's bound profile after the user changes the defaul
   expect(binding.profileId).toBe(a.id);
   expect(calls.find((call) => call.kind === "memory")?.value).toMatchObject({ id: a.id });
   expect(JSON.parse(output.join("")).binding.profile_id).toBe(a.id);
+  const installed = await loadInstallState({ stateDirectory: f.stateDirectory });
+  expect(installed.projects).toEqual([{ project_root: f.project, hosts: ["codex", "claude-code", "opencode", "dsh", "claude-desktop"] }]);
 });
 
 test("explicit init profile is the only rebind path and delegates adapter installation", async () => {

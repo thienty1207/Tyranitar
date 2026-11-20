@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { InProcessTyrantTool } from "./local-tools";
 import { resolveProjectProfileSync } from "../setup/profiles";
+import { TYRANT_VERSION } from "../version";
 
 const TYRANT_ENVIRONMENT_KEYS = [
   "AI_MEMORY_DATA_DIR",
@@ -90,7 +91,7 @@ export async function openDshTyrantMcpClient(
     stderr: "pipe",
   });
   transport.stderr?.on("data", () => undefined);
-  const client = new Client({ name: "tyrant-dsh-adapter", version: "0.1.0" });
+  const client = new Client({ name: "tyrant-dsh-adapter", version: TYRANT_VERSION });
 
   try {
     await client.connect(transport);

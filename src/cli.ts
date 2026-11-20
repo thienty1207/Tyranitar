@@ -21,6 +21,9 @@ import {
 import { ensureAiMemoryProfile, readAiMemoryProfileConfig } from "./setup/ai-memory-runtime";
 import { ensureGraphifyRuntime, graphifyRuntimeStatus, type GraphifyRuntimeStatus } from "./setup/graphify-runtime";
 import { ensureDshPlugin, type DshPluginResult } from "./setup/dsh-runtime";
+import { updateTyrant } from "./setup/release-update";
+import { registerInstalledProject, saveDshProfile } from "./setup/install-state";
+import { TYRANT_VERSION } from "./version";
 import {
   getProjectAdapterStatus,
   installProjectAdapters,
@@ -42,6 +45,7 @@ export type TyrantCliDependencies = {
   ensureAiMemory?: typeof ensureAiMemoryProfile;
   ensureGraphify?: typeof ensureGraphifyRuntime;
   ensureDshPlugin?: typeof ensureDshPlugin;
+  updateTyrant?: typeof updateTyrant;
   graphifyStatus?: typeof graphifyRuntimeStatus;
   previewAdapters?: typeof previewProjectAdapters;
   installAdapters?: typeof installProjectAdapters;
@@ -128,11 +132,13 @@ async function setupVault(parsed: ParsedArgs, dependencies: TyrantCliDependencie
     initialize: true, stateDirectory: dependencies.stateDirectory, env,
   });
   if (memory.authStatus !== "ready" || memory.version !== "3.4.7") throw new Error("ai_memory_setup_unverified");
+  const dshProfile = parsed.flags.get("--dsh-profile")?.trim() || env.TYRANT_DSH_PROFILE?.trim() || "desktop";
   const dshPlugin = await (dependencies.ensureDshPlugin ?? ensureDshPlugin)({
     tyrantRoot: resolve(dependencies.tyrantRoot ?? packageRoot()),
-    profile: parsed.flags.get("--dsh-profile"),
+    profile: dshProfile,
     env,
   });
+  await saveDshProfile(dshProfile, stateOptions(dependencies));
   const profile = await activateVaultProfile({
     id: candidate.id,
     name: candidate.name,
@@ -213,7 +219,7 @@ async function initProject(parsed: ParsedArgs, dependencies: TyrantCliDependenci
   const dshPlugin: DshPluginResult | undefined = hosts.includes("dsh")
     ? await (dependencies.ensureDshPlugin ?? ensureDshPlugin)({
       tyrantRoot: adapters.tyrantRoot,
-      profile: parsed.flags.get("--dsh-profile"),
+      profile: parsed.flags.get("--dsh-profile")?.trim() || (dependencies.env ?? process.env).TYRANT_DSH_PROFILE?.trim() || "desktop",
       env: dependencies.env ?? process.env,
     })
     : undefined;
@@ -223,6 +229,12 @@ async function initProject(parsed: ParsedArgs, dependencies: TyrantCliDependenci
   });
   if (installation.status === "conflict") throw new Error("project_adapter_install_conflict");
   const binding = await bindProjectProfile({ projectRoot: cwd, profile, explicitRebind: explicit, scope, scopeSource }, stateOptions(dependencies));
+  const registeredHosts = Object.keys(installation.hosts ?? {}).filter((host) => HOSTS.has(host as ProjectAdapterHost)) as ProjectAdapterHost[];
+  await registerInstalledProject(cwd, registeredHosts.length ? registeredHosts : hosts, stateOptions(dependencies));
+  if (dshPlugin) {
+    const selectedDshProfile = parsed.flags.get("--dsh-profile")?.trim() || (dependencies.env ?? process.env).TYRANT_DSH_PROFILE?.trim() || "desktop";
+    await saveDshProfile(selectedDshProfile, stateOptions(dependencies));
+  }
   const boundProfile = profile;
   output(dependencies, "stdout", {
     status: installation.status === "manual_action_required" ? "manual_action_required" : "ready",
@@ -330,9 +342,17 @@ export async function runTyrantCli(args = process.argv.slice(2), dependencies: T
       output(dependencies, "stdout", { usage: [
         "tyrant setup [<vault-path>] [--name <profile-label>] [--dsh-profile <name>]",
         "tyrant init [--vault <profile-label-or-id>] [--hosts <list>] [--dsh-profile <name>]",
+        "tyrant update",
+        "tyrant --version",
         "tyrant status",
         "tyrant doctor",
       ] });
+      return 0;
+    }
+    if (operation === "--version" || operation === "-V" || operation === "version") {
+      const text = `tyrant ${TYRANT_VERSION}\n`;
+      if (dependencies.write) dependencies.write("stdout", text);
+      else process.stdout.write(text);
       return 0;
     }
     const allowed = operation === "setup" ? new Set(["--name", "--dsh-profile"])
@@ -341,6 +361,16 @@ export async function runTyrantCli(args = process.argv.slice(2), dependencies: T
     const parsed = parseArgs(rest, allowed);
     if (operation === "setup") return await setupVault(parsed, dependencies);
     if (operation === "init") return await initProject(parsed, dependencies);
+    if (operation === "update") {
+      if (parsed.positionals.length) throw new Error("update_accepts_flags_only");
+      const result = await (dependencies.updateTyrant ?? updateTyrant)({
+        currentRoot: resolve(dependencies.tyrantRoot ?? packageRoot()),
+        stateDirectory: dependencies.stateDirectory,
+        env: dependencies.env,
+      });
+      output(dependencies, "stdout", result);
+      return 0;
+    }
     if (operation === "status") return await statusCommand(dependencies, false);
     if (operation === "doctor") return await statusCommand(dependencies, true);
     throw new Error("unknown_command");

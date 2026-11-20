@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { getTyrantUserDirectory, type VaultProfile } from "./profiles";
+import { TYRANT_VERSION } from "../version";
 
 export const AI_MEMORY_PINNED_VERSION = "3.4.7";
 const AI_MEMORY_ARCHIVE_URL = `https://github.com/akitaonrails/ai-memory/releases/download/v${AI_MEMORY_PINNED_VERSION}/ai-memory-windows-x86_64.zip`;
@@ -388,7 +389,7 @@ async function defaultProbe(config: AiMemoryProfileConfig, profile: VaultProfile
   const transport = new StreamableHTTPClientTransport(new URL(config.endpoint), {
     requestInit: { headers: { Authorization: `Bearer ${config.authToken}` }, redirect: "error" },
   });
-  const client = new Client({ name: "tyrant-setup", version: "0.1.0" });
+  const client = new Client({ name: "tyrant-setup", version: TYRANT_VERSION });
   try {
     await client.connect(transport, { timeout: 3_000 });
     const server = client.getServerVersion();

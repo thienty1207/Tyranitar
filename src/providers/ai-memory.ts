@@ -5,6 +5,7 @@ import { redactSensitiveText } from "../state/redaction";
 import { configuredTokenPath, ensureAiMemoryProfile, inspectAiMemoryEndpointOwner, aiMemoryProfileIdentityMarker, readAiMemoryProfileConfig, readTokenFileSafe } from "../setup/ai-memory-runtime";
 import { readConfiguredProjectScope, resolveProjectProfileSync, type ProfileStoreOptions, type VaultProfile } from "../setup/profiles";
 import { AI_MEMORY_UPSTREAM_TOOLS } from "./ai-memory-tool-contract";
+import { TYRANT_VERSION } from "../version";
 
 const DEFAULT_URL = "http://127.0.0.1:49374/mcp";
 const MAX_CONTEXT_CHARS = 6_000;
@@ -460,7 +461,7 @@ export class AiMemoryProvider {
     const transport = new StreamableHTTPClientTransport(new URL(config.url), {
       requestInit: { headers, redirect: "error" },
     });
-    const client = new Client({ name: "tyrant", version: "0.1.0" });
+    const client = new Client({ name: "tyrant", version: TYRANT_VERSION });
     try {
       await client.connect(transport, { timeout: config.timeoutMs });
       await this.verifyProfileOnClient(client, config);

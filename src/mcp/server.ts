@@ -19,6 +19,7 @@ import { GraphifyProvider, type GraphifyContextResult } from "../providers/graph
 import { SKILL_CATALOG } from "../routing/catalog";
 import { routeTask } from "../routing/router";
 import { TyrantError, withTyrantStore } from "../state/store";
+import { TYRANT_VERSION } from "../version";
 
 const serverInstructions = [
   "For repository work, call tyrant_prepare_task before changing files.",
@@ -89,7 +90,7 @@ export function createTyrantServer(options: {
   const aiMemory = options.aiMemory ?? new AiMemoryProvider(undefined, options.projectRoot, options.stateDirectory);
   const graphify = options.graphify ?? new GraphifyProvider({ projectRoot: options.projectRoot });
   const server = new McpServer(
-    { name: "tyrant", version: "0.1.0" },
+    { name: "tyrant", version: TYRANT_VERSION },
     {
       instructions: serverInstructions,
       maxToolInputElements: 256,

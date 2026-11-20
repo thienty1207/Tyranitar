@@ -15,6 +15,8 @@ export type ProjectAdapterSetupOptions = {
   hosts: ProjectAdapterHost[];
   profileGuidance?: ProjectProfileGuidance;
   dshPluginStatus?: "installed" | "ready" | "not_detected";
+  allowManagedUpgrade?: boolean;
+  verifiedSkillBundle?: VerifiedPinnedSkillBundle;
 };
 
 type ManagedFile = {
@@ -38,8 +40,39 @@ type OwnerManifest = {
   manifest_sha256: string;
 };
 
-type ProposedFile = { path: string; content: Buffer; purpose: string };
+export type ProposedFile = { path: string; content: Buffer; purpose: string };
 type Conflict = { path: string; reason: string };
+
+async function mapBounded<T, R>(items: readonly T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index]!, index);
+    }
+  }));
+  return results;
+}
+
+export class VerifiedPinnedSkillBundle {
+  private constructor(readonly root: string, private readonly files: ProposedFile[]) {}
+
+  static async load(root: string): Promise<VerifiedPinnedSkillBundle> {
+    const canonicalRoot = await loadRoot(root);
+    return new VerifiedPinnedSkillBundle(canonicalRoot, await readVendoredSkillFiles(canonicalRoot));
+  }
+
+  filesFor(root: string): ProposedFile[] {
+    const selected = resolve(root);
+    const matches = process.platform === "win32"
+      ? selected.toLocaleLowerCase("en-US") === this.root.toLocaleLowerCase("en-US")
+      : selected === this.root;
+    if (!matches) throw new Error("pinned_skill_bundle_root_mismatch");
+    return this.files;
+  }
+}
 
 const MANIFEST_PATH = ".tyrant/adapters/manifest.json";
 const ADAPTER_DIRECTORY = ".tyrant/adapters";
@@ -244,10 +277,8 @@ async function readVendoredSkillFiles(tyrantRoot: string): Promise<ProposedFile[
     }
   }
 
-  let totalBytes = 0;
   const paths = new Set<string>();
-  const installed: ProposedFile[] = [];
-  const skillPaths = new Set<string>();
+  const entries: Array<{ entry: Record<string, unknown>; vendorPath: string; projectPath: string }> = [];
   for (const value of manifest.files) {
     const entry = asObject(value, "vendor/skills/manifest.json:file");
     if (typeof entry.source_path !== "string" || typeof entry.vendor_path !== "string" || typeof entry.project_path !== "string"
@@ -276,24 +307,23 @@ async function readVendoredSkillFiles(tyrantRoot: string): Promise<ProposedFile[
     const projectPathKey = projectPath.toLowerCase();
     if (paths.has(projectPathKey)) throw new Error("pinned_skill_duplicate_project_path");
     paths.add(projectPathKey);
+    entries.push({ entry, vendorPath, projectPath });
+  }
 
+  const installed = await mapBounded(entries, 32, async ({ entry, vendorPath, projectPath }) => {
     const source = await inspectPath(sourceRoot, vendorPath);
     if (!source.exists || !source.bytes) throw new Error(`pinned_skill_file_missing:${vendorPath}`);
     const matchesPin = (bytes: Buffer) => bytes.length === Number(entry.size)
       && hash(bytes) === entry.sha256 && gitBlobHash(bytes) === entry.git_blob_sha;
     const pinnedBytes = matchesPin(source.bytes) ? source.bytes : normalizeCrLfToLf(source.bytes);
-    if (!matchesPin(pinnedBytes)) {
-      throw new Error(`pinned_skill_hash_mismatch:${vendorPath}`);
-    }
-    totalBytes += pinnedBytes.length;
-    if (totalBytes > MAX_VENDORED_SKILL_TOTAL_BYTES) throw new Error("pinned_skill_package_too_large");
-    installed.push({ path: projectPath, content: pinnedBytes, purpose: "pinned skill package file; upstream, revision and license are recorded in its manifest" });
-    if (projectPath.endsWith("/SKILL.md")) skillPaths.add(projectPath);
-  }
+    if (!matchesPin(pinnedBytes)) throw new Error(`pinned_skill_hash_mismatch:${vendorPath}`);
+    return { path: projectPath, content: pinnedBytes, purpose: "pinned skill package file; upstream, revision and license are recorded in its manifest" };
+  });
+  if (installed.reduce((total, file) => total + file.content.length, 0) > MAX_VENDORED_SKILL_TOTAL_BYTES) throw new Error("pinned_skill_package_too_large");
+  const skillPaths = new Set(installed.filter((file) => file.path.endsWith("/SKILL.md")).map((file) => file.path));
   for (const path of REQUIRED_BUNDLED_SKILL_FILES) if (!skillPaths.has(path)) throw new Error(`required_pinned_skill_missing:${path}`);
   for (const path of REQUIRED_BUNDLED_LICENSE_FILES) if (!paths.has(path.toLowerCase())) throw new Error(`required_pinned_skill_license_missing:${path}`);
-  installed.push({ path: ".tyrant/skills/manifest.json", content: manifestResult.bytes, purpose: "pinned skill source, revision, license and integrity manifest" });
-  return installed;
+  return [...installed, { path: ".tyrant/skills/manifest.json", content: manifestResult.bytes, purpose: "pinned skill source, revision, license and integrity manifest" }];
 }
 
 function asObject(value: unknown, path: string): Record<string, unknown> {
@@ -378,8 +408,7 @@ function mergeMcpJsonConfig(
   }
   const namespace = mode === "claude-code" ? jsonChild(config, "mcpServers", relativePath) : jsonChild(jsonChild(config, "mcp", relativePath), "servers", relativePath);
   if (namespace.tyrant !== undefined) {
-    if (alreadyManaged && JSON.stringify(namespace.tyrant) === JSON.stringify(serverEntry)) return Buffer.from(`${JSON.stringify(config, null, 2)}\n`, "utf8");
-    throw new Error(`${relativePath}:ownership_ambiguous:mcpServers.tyrant`);
+    if (!alreadyManaged) throw new Error(`${relativePath}:ownership_ambiguous:mcpServers.tyrant`);
   }
   namespace.tyrant = serverEntry;
   return Buffer.from(`${JSON.stringify(config, null, 2)}\n`, "utf8");
@@ -392,11 +421,19 @@ function codexConfigContent(
   mcpEntryPath: string,
   projectRoot: string,
   alreadyManaged: boolean,
+  allowManagedUpgrade: boolean,
 ): Buffer {
-  const current = existing?.toString("utf8") ?? "";
+  let current = existing?.toString("utf8") ?? "";
   if (current.includes(CODEX_MANAGED_START) || current.includes(CODEX_MANAGED_END)) {
-    if (alreadyManaged && current.includes(CODEX_MANAGED_START) && current.includes(CODEX_MANAGED_END)) return Buffer.from(current, "utf8");
-    throw new Error(`${relativePath}:ownership_ambiguous:tyrant_block`);
+    const startIndex = current.indexOf(CODEX_MANAGED_START);
+    const endIndex = current.indexOf(CODEX_MANAGED_END);
+    const afterIndex = endIndex + CODEX_MANAGED_END.length;
+    const markersAreUnique = startIndex >= 0 && endIndex > startIndex
+      && current.indexOf(CODEX_MANAGED_START, startIndex + CODEX_MANAGED_START.length) < 0
+      && current.indexOf(CODEX_MANAGED_END, afterIndex) < 0;
+    if (!alreadyManaged || !markersAreUnique) throw new Error(`${relativePath}:ownership_ambiguous:tyrant_block`);
+    if (!allowManagedUpgrade) return Buffer.from(current, "utf8");
+    current = `${current.slice(0, startIndex)}${current.slice(afterIndex)}`;
   }
   let config: Record<string, unknown> = {};
   if (current.trim()) {
@@ -512,17 +549,17 @@ async function verifyManifestTargets(root: string, manifest: OwnerManifest): Pro
     conflicts.push({ path: MANIFEST_PATH, reason: "setup_interrupted_rollback_before_retry" });
     return conflicts;
   }
-  for (const file of manifest.files) {
+  const results = await mapBounded(manifest.files, 32, async (file) => {
     try {
       const current = await inspectPath(root, file.path);
-      if (!current.exists || !managedFileMatches(file, current.bytes)) {
-        conflicts.push({ path: file.path, reason: "managed_file_changed_since_install" });
-      }
+      return !current.exists || !managedFileMatches(file, current.bytes)
+        ? { path: file.path, reason: "managed_file_changed_since_install" }
+        : undefined;
     } catch (error) {
-      conflicts.push({ path: file.path, reason: error instanceof Error ? error.message : "managed_file_unreadable" });
+      return { path: file.path, reason: error instanceof Error ? error.message : "managed_file_unreadable" };
     }
-  }
-  return conflicts;
+  });
+  return results.filter((conflict): conflict is Conflict => conflict !== undefined);
 }
 
 async function planFiles(options: ProjectAdapterSetupOptions, root: string, managedPaths = new Set<string>()): Promise<{ files: ProposedFile[]; conflicts: Conflict[]; hosts: Partial<Record<ProjectAdapterHost, string>>; manualActions: string[] }> {
@@ -543,7 +580,9 @@ async function planFiles(options: ProjectAdapterSetupOptions, root: string, mana
     }
   }
   try {
-    const pinnedSkills = await readVendoredSkillFiles(options.tyrantRoot);
+    const pinnedSkills = options.verifiedSkillBundle
+      ? options.verifiedSkillBundle.filesFor(options.tyrantRoot)
+      : await readVendoredSkillFiles(options.tyrantRoot);
     files.push(...pinnedSkills);
     if (selected.includes("dsh")) {
       for (const file of pinnedSkills) {
@@ -586,7 +625,7 @@ async function planFiles(options: ProjectAdapterSetupOptions, root: string, mana
         if (host === "codex") {
           const legacyHooks = await inspectPath(root, ".codex/hooks.json");
           if (legacyHooks.exists) throw new Error(".codex/hooks.json:existing_hook_source_use_one_codex_hook_representation");
-          content = codexConfigContent(current.bytes, configRelative, targetHook, mcpEntryPath, root, managedPaths.has(configRelative));
+          content = codexConfigContent(current.bytes, configRelative, targetHook, mcpEntryPath, root, managedPaths.has(configRelative), options.allowManagedUpgrade === true);
         } else {
           content = mergeHookConfig(current.bytes, configRelative, targetHook, host, managedPaths.has(configRelative));
         }
@@ -663,7 +702,9 @@ async function createPlan(options: ProjectAdapterSetupOptions) {
     }
     for (const file of planned.files) {
       const old = existingManifest.files.find((item) => item.path === file.path);
-      if (old && old.installed_sha256 !== hash(file.content) && file.path !== "AGENTS.md") planned.conflicts.push({ path: file.path, reason: "managed_adapter_version_changed_rollback_before_upgrade" });
+      if (!options.allowManagedUpgrade && old && old.installed_sha256 !== hash(file.content) && file.path !== "AGENTS.md") {
+        planned.conflicts.push({ path: file.path, reason: "managed_adapter_version_changed_rollback_before_upgrade" });
+      }
     }
   } else if (!baseConflicts.length) {
     if ("error" in manifestPath) {

@@ -595,6 +595,33 @@ test("user edits outside Tyrant guidance survive re-init and uninstall", async (
   }
 });
 
+test("updates registered managed adapter files only when prior hashes still match", async () => {
+  expect(setupApi?.installProjectAdapters).toBeDefined();
+  expect(setupApi?.previewProjectAdapters).toBeDefined();
+  if (!setupApi) return;
+  const f = await fixture(["codex"]);
+  try {
+    const first = { ...f.options, profileGuidance: { profileId: "profile-a", profileName: "Vault A", workspace: "workspace-a", project: "project-a" } };
+    expect((await setupApi.installProjectAdapters(first)).status).toBe("installed");
+    const oldConfig = await readFile(join(f.projectRoot, ".codex", "config.toml"), "utf8");
+    await writeFile(join(f.tyrantRoot, "integrations", "command-hook.js"), "// updated command adapter\n");
+
+    const update = { ...first, allowManagedUpgrade: true };
+    expect((await setupApi.previewProjectAdapters(update)).status).toBe("ready");
+    expect((await setupApi.installProjectAdapters(update)).status).toBe("installed");
+    expect(await readFile(join(f.projectRoot, ".tyrant", "adapters", "command-hook.js"), "utf8")).toBe("// updated command adapter\n");
+    expect(await readFile(join(f.projectRoot, ".codex", "config.toml"), "utf8")).toBe(oldConfig);
+
+    const userEdited = join(f.projectRoot, ".tyrant", "adapters", "command-hook.js");
+    await writeFile(userEdited, "// local edit\n");
+    const blocked = await setupApi.previewProjectAdapters(update);
+    expect(blocked.status).toBe("conflict");
+    expect(await readFile(userEdited, "utf8")).toBe("// local edit\n");
+  } finally {
+    await rm(f.base, { recursive: true, force: true });
+  }
+});
+
 test("uninstall preserves user text added outside Tyrant guidance without re-init", async () => {
   expect(setupApi?.installProjectAdapters).toBeDefined();
   expect(setupApi?.uninstallProjectAdapters).toBeDefined();
