@@ -20,50 +20,29 @@ This release supports Windows x64. It does not require Git, Node.js, Python, `uv
 
 ## Choose your default AI-Memory vault
 
-Run `tyrant setup` once for the vault you want new projects to use:
+Open PowerShell in the folder you want to use as your AI-Memory vault, then run:
 
 ```powershell
-tyrant setup "D:\AI-MEMORY" --name "AI-MEMORY"
-```
-
-Choose any folder and label you like. Tyrant creates the folder if needed, configures AI-Memory there, and installs or checks the pinned Graphify runtime. The last vault passed to `tyrant setup` becomes the default for projects initialized afterward. You can run the command from inside an existing vault folder without passing a path:
-
-```powershell
-Set-Location "D:\AI-MEMORY"
 tyrant setup
 ```
+
+Tyrant initializes AI-Memory for that vault, installs or checks its managed Graphify runtime, and makes that folder the default vault for projects you initialize afterward. You do not need to pass a path or a profile name.
 
 Tyrant keeps the AI-Memory vault at the path you selected. It keeps its managed Graphify, `uv`, and Python runtimes under `%LOCALAPPDATA%\Tyrant\runtimes\`. Graphify is provisioned by `tyrant setup`; it is not a vendored source folder under `vendor/`. You do not install Graphify or `uv` yourself.
 
 ## Initialize a project
 
-Open PowerShell in the project folder and run:
+Open PowerShell in the project folder, then run:
 
 ```powershell
-Set-Location "D:\path\to\your-project"
 tyrant init
 ```
 
-Tyrant binds that project to the current default vault, gives it a separate AI-Memory project scope, installs the selected host adapters and skills, and registers it so `tyrant update` can refresh Tyrant managed project files later. Repeat this once for each project.
-
-To initialize a project with a different saved vault:
-
-```powershell
-tyrant init --vault "another-vault-label"
-```
-
-Changing the default with `tyrant setup` does not silently move projects that are already initialized. To deliberately rebind an existing project, run `tyrant init --vault "another-vault-label"` from that project folder.
+Tyrant binds a new project to the current default vault, gives it a separate AI-Memory project scope, installs the selected host adapters and skills, and registers it so `tyrant update` can refresh Tyrant-managed project files later. Repeat this once for each project. An already initialized project keeps its saved vault binding if you change the default later.
 
 ## Switch between vaults
 
-Set whichever vault should be the default for the next projects by running setup for that vault again:
-
-```powershell
-tyrant setup "D:\AI-MEMORY-WEBDEV" --name "AI-MEMORY-WEBDEV"
-tyrant setup "D:\AI-MEMORY-DESKTOPDEV" --name "AI-MEMORY-DESKTOPDEV"
-```
-
-The labels are user supplied; Tyrant does not treat them as built in project types. Projects already bound to a vault continue using their saved binding until you explicitly rebind them.
+To switch the default, open PowerShell in the other vault folder and run the same single command: `tyrant setup`. New projects initialized afterward use that vault. Existing projects keep their saved bindings.
 
 ## Update Tyrant
 
