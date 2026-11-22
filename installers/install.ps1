@@ -233,7 +233,7 @@ function Invoke-TyrantInstall {
     }
     Set-TyrantActiveRoot $versionPath
     Add-TyrantUserPath $binPath
-    Write-Output "Installed Tyrant $($asset.version). Run tyrant setup <vault-path>, then tyrant init in each project."
+    Write-Output "Installed Tyrant $($asset.version). Run tyrant setup from the vault folder, then run tyrant init from each project folder."
   } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
